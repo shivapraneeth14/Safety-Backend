@@ -1,0 +1,39 @@
+# -----------------------------
+# Node.js Backend
+# -----------------------------
+Backend/node_modules/
+Backend/.env
+Backend/npm-debug.log*
+Backend/yarn-debug.log*
+Backend/yarn-error.log*
+Backend/package-lock.json
+
+# -----------------------------
+# Optional Frontend (if added later)
+# -----------------------------
+Frontend/node_modules/
+Frontend/.env
+Frontend/build/
+Frontend/dist/
+
+# -----------------------------
+# Logs and temporary files
+# -----------------------------
+*.log
+*.tmp
+*.bak
+
+# -----------------------------
+# OS / Editor files
+# -----------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# Build / distribution folders
+# -----------------------------
+dist/
+build/
+coverage/
