@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import cors from "cors";
 import router from "./Routes/User.routes.js";
 import { createServer } from "http";
-import WebSocket, { WebSocketServer } from "ws";
+import { WebSocketServer } from "ws";
 
 dotenv.config();
 const app = express();
@@ -25,7 +25,6 @@ app.get("/", (req, res) => {
   console.log("🌐 HTTP GET / - Server is alive");
   res.send("Backend is running 🚀");
 });
-
 app.post("/api/test", (req, res) => {
   console.log("📨 POST /api/test hit with data:", req.body);
   res.json({ message: "Test route works" });
@@ -40,7 +39,7 @@ const wss = new WebSocketServer({ server });
 wss.on("connection", (ws) => {
   console.log("🔗 New client connected via WebSocket");
 
-  // Send a welcome message to the client
+  // Send welcome message
   ws.send(JSON.stringify({ message: "Welcome to WebSocket server!" }));
   console.log("📤 Sent welcome message to client");
 
@@ -51,11 +50,10 @@ wss.on("connection", (ws) => {
       const data = JSON.parse(message);
       console.log("📊 Parsed vehicle data:", data);
 
-      // Example: here you could save to DB or calculate risk
-      // For now, just log it
-      console.log("✅ Data logged successfully for processing");
+      // Here you could save to DB or calculate risk
+      console.log("✅ Data logged successfully");
 
-      // Send acknowledgment back to client
+      // Send acknowledgment back
       ws.send(JSON.stringify({ status: "received", timestamp: new Date() }));
       console.log("📤 Sent acknowledgment to client");
     } catch (err) {
