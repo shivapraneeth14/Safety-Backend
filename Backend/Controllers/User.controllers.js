@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import User from "../Models/User.Model.js";
 
+
 const saltroundes = 10;
 async function generatebothtoken(userid) {
     try {
@@ -124,4 +125,117 @@ const Login = async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-export{register,Login};
+const getuserprofile = async (req, res) => {
+  const { username } = req.query;
+
+  console.log("Fetching profile for:", username);
+
+  try {
+    if (!username || username.trim() === "") {
+      return res.status(400).json({ message: "Username is required" });
+    }
+
+    const user = await User.findOne({ username }).select(
+      "-password -refreshToken"
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "User profile fetched successfully",
+      user,
+    });
+  } catch (error) {
+    console.error("getuserprofile error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+const getCurrentUserProfile = async (req, res) => {
+  console.log("getCurrentUserProfile called");
+
+  try {
+    // 1️⃣ Check Authorization header
+    const authHeader = req.headers?.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res
+        .status(401)
+        .json({ message: "Authorization header missing or malformed" });
+    }
+
+    // 2️⃣ Extract token
+    const token = authHeader.split(" ")[1];
+    if (!token) {
+      return res.status(401).json({ message: "Token missing" });
+    }
+
+    // 3️⃣ Verify token
+    let payload;
+    try {
+      payload = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    } catch (err) {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
+    // 4️⃣ Validate user ID in token
+    const userId = payload?._id;
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: "Invalid user identifier" });
+    }
+
+    // 5️⃣ Fetch user data (exclude password & refreshToken)
+    const user = await User.findById(userId).select("-password -refreshToken");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // 6️⃣ Return user data
+    return res.status(200).json({
+      message: "User profile fetched successfully",
+      user,
+    });
+  } catch (error) {
+    console.error("getCurrentUserProfile error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+const logout = async (req, res) => {
+  try {
+    const authHeader = req.headers?.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(400).json({ message: "Authorization header missing or malformed" });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    let payload;
+    try {
+      payload = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    } catch (err) {
+      // Even if token invalid, still return success
+      return res.status(200).json({ message: "Logged out successfully" });
+    }
+
+    const userId = payload?._id;
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: "Invalid user identifier" });
+    }
+
+    // Remove refresh token from DB
+    await User.findByIdAndUpdate(userId, { $unset: { refreshToken: "" } });
+
+    // Clear cookies (if used)
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
+
+    return res.status(200).json({ message: "Logged out successfully" });
+  } catch (error) {
+    console.error("Logout error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+
+export{register,Login,getuserprofile,logout,getCurrentUserProfile};
