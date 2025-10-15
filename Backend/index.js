@@ -57,6 +57,55 @@ function getDistanceInMeters(loc1, loc2) {
   return R * c; // distance in meters
 }
 
+// ---- Configurable thresholds (override via environment) ----
+const CONFIG = {
+  NEARBY_RADIUS_METERS: Number(process.env.NEARBY_RADIUS_METERS ?? 75),
+  PROJECTION_TIME_SECONDS: Number(process.env.PROJECTION_TIME_SECONDS ?? 2),
+  THREAT_DISTANCE_METERS: Number(process.env.THREAT_DISTANCE_METERS ?? 12),
+  MIN_MOVING_SPEED_MS: Number(process.env.MIN_MOVING_SPEED_MS ?? 0.1),
+  ANGULAR_VEL_HIGH_DEG_S: Number(process.env.ANGULAR_VEL_HIGH_DEG_S ?? 45),
+  UNCERTAINTY_INFLATION_METERS: Number(process.env.UNCERTAINTY_INFLATION_METERS ?? 5),
+  BLIND_SPOT_RADIUS_BOOST_METERS: Number(process.env.BLIND_SPOT_RADIUS_BOOST_METERS ?? 8),
+  STALE_MS: Number(process.env.STALE_MS ?? 4000),
+};
+
+function normalizeHeadingDeg(value) {
+  if (!Number.isFinite(value)) return 0;
+  let h = value % 360;
+  if (h < 0) h += 360;
+  return h;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+// Forward geodesic projection using bearing (deg) and distance (m)
+function projectPoint(latDeg, lonDeg, bearingDeg, distanceMeters) {
+  const R = 6371e3;
+  const φ1 = (latDeg * Math.PI) / 180;
+  const λ1 = (lonDeg * Math.PI) / 180;
+  const θ = (bearingDeg * Math.PI) / 180;
+  const δ = distanceMeters / R;
+
+  const sinφ1 = Math.sin(φ1);
+  const cosφ1 = Math.cos(φ1);
+  const sinδ = Math.sin(δ);
+  const cosδ = Math.cos(δ);
+
+  const sinφ2 = sinφ1 * cosδ + cosφ1 * sinδ * Math.cos(θ);
+  const φ2 = Math.asin(sinφ2);
+  const y = Math.sin(θ) * sinδ * cosφ1;
+  const x = cosδ - sinφ1 * sinφ2;
+  const λ2 = λ1 + Math.atan2(y, x);
+
+  const lat2 = (φ2 * 180) / Math.PI;
+  let lon2 = (λ2 * 180) / Math.PI;
+  if (lon2 > 180) lon2 -= 360;
+  if (lon2 < -180) lon2 += 360;
+  return { lat: lat2, lng: lon2 };
+}
+
 wss.on("connection", (ws) => {
   console.log("🔗 New WebSocket client connected");
 
@@ -87,7 +136,10 @@ wss.on("connection", (ws) => {
       await redisClient.set(`userData:${data.userId}`, JSON.stringify(data), { EX: ttl });
       console.log(`💾 Redis user data set for ${data.userId} with TTL ${ttl}s`);
 
-      const nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, 50, "m", { COUNT: 50 });
+      // Inflate nearby radius during blind-spot scenarios (e.g., high angular velocity)
+      const isSuddenTurn = Math.abs(data.gyro?.z ?? 0) >= CONFIG.ANGULAR_VEL_HIGH_DEG_S;
+      const dynamicRadius = CONFIG.NEARBY_RADIUS_METERS + (isSuddenTurn ? CONFIG.BLIND_SPOT_RADIUS_BOOST_METERS : 0);
+      const nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, dynamicRadius, "m", { COUNT: 50 });
       console.log(`🔎 Nearby users of ${data.userId}:`, nearbyUserIds);
 
       const threats = [];
@@ -102,24 +154,40 @@ wss.on("connection", (ws) => {
         if (!userInfoRaw) continue;
         const userInfo = JSON.parse(userInfoRaw);
 
-        const projectionTime = 2;
-        const headingChangeSelf = data.gyro?.z || 0;
-        const headingChangeOther = userInfo.gyro?.z || 0;
+        // Skip stale opponents to reduce ghost threats
+        const now = Date.now();
+        const userInfoTs = new Date(userInfo.timestamp || 0).getTime();
+        if (!Number.isFinite(userInfoTs) || now - userInfoTs > CONFIG.STALE_MS) continue;
 
-        const projectedLat1 = data.latitude + Math.sin((data.heading + headingChangeSelf * projectionTime) * Math.PI / 180) * data.speed * 0.00001 * projectionTime;
-        const projectedLng1 = data.longitude + Math.cos((data.heading + headingChangeSelf * projectionTime) * Math.PI / 180) * data.speed * 0.00001 * projectionTime;
+        const projectionTime = CONFIG.PROJECTION_TIME_SECONDS;
+        const gyroZSelf = Number.isFinite(data.gyro?.z) ? data.gyro.z : 0;
+        const gyroZOther = Number.isFinite(userInfo.gyro?.z) ? userInfo.gyro.z : 0;
+        const headingSelf = normalizeHeadingDeg((data.heading ?? 0) + clamp(gyroZSelf, -90, 90) * projectionTime);
+        const headingOther = normalizeHeadingDeg((userInfo.heading ?? 0) + clamp(gyroZOther, -90, 90) * projectionTime);
 
-        const projectedLat2 = userInfo.latitude + Math.sin((userInfo.heading + headingChangeOther * projectionTime) * Math.PI / 180) * userInfo.speed * 0.00001 * projectionTime;
-        const projectedLng2 = userInfo.longitude + Math.cos((userInfo.heading + headingChangeOther * projectionTime) * Math.PI / 180) * userInfo.speed * 0.00001 * projectionTime;
+        const accelMagnitudeSelf = Math.sqrt((data.accel?.x ?? 0) ** 2 + (data.accel?.y ?? 0) ** 2 + (data.accel?.z ?? 0) ** 2);
+        const accelMagnitudeOther = Math.sqrt((userInfo.accel?.x ?? 0) ** 2 + (userInfo.accel?.y ?? 0) ** 2 + (userInfo.accel?.z ?? 0) ** 2);
+        const projectedSpeedSelf = Math.max((data.speed ?? 0) + accelMagnitudeSelf * projectionTime, 0);
+        const projectedSpeedOther = Math.max((userInfo.speed ?? 0) + accelMagnitudeOther * projectionTime, 0);
 
-        const distance = getDistanceInMeters({ lat: projectedLat1, lng: projectedLng1 }, { lat: projectedLat2, lng: projectedLng2 });
+        const displacementSelf = projectedSpeedSelf * projectionTime; // meters
+        const displacementOther = projectedSpeedOther * projectionTime; // meters
 
-        const accelMagnitudeSelf = Math.sqrt((data.accel?.x ?? 0) ** 2 + (data.accel?.y ?? 0) ** 2);
-        const accelMagnitudeOther = Math.sqrt((userInfo.accel?.x ?? 0) ** 2 + (userInfo.accel?.y ?? 0) ** 2);
-        const projectedSpeedSelf = Math.max(data.speed + accelMagnitudeSelf * projectionTime, 0);
-        const projectedSpeedOther = Math.max(userInfo.speed + accelMagnitudeOther * projectionTime, 0);
+        const p1 = projectPoint(data.latitude, data.longitude, headingSelf, displacementSelf);
+        const p2 = projectPoint(userInfo.latitude, userInfo.longitude, headingOther, displacementOther);
 
-        if (distance < 10 && projectedSpeedSelf > 0 && projectedSpeedOther > 0) {
+        let distance = getDistanceInMeters({ lat: p1.lat, lng: p1.lng }, { lat: p2.lat, lng: p2.lng });
+
+        // Inflate distance threshold under sudden turning uncertainty
+        if (Math.abs(gyroZSelf) >= CONFIG.ANGULAR_VEL_HIGH_DEG_S || Math.abs(gyroZOther) >= CONFIG.ANGULAR_VEL_HIGH_DEG_S) {
+          distance -= CONFIG.UNCERTAINTY_INFLATION_METERS;
+        }
+
+        if (
+          distance < CONFIG.THREAT_DISTANCE_METERS &&
+          projectedSpeedSelf > CONFIG.MIN_MOVING_SPEED_MS &&
+          projectedSpeedOther > CONFIG.MIN_MOVING_SPEED_MS
+        ) {
           threats.push([data.userId, uid]);
           console.log(`⚠️ Threat detected between ${data.userId} and ${uid}`);
         }
@@ -135,10 +203,8 @@ wss.on("connection", (ws) => {
         const userData1 = JSON.parse(userData1Raw);
         const userData2 = JSON.parse(userData2Raw);
 
-        threatPositions.push({
-          user1: { id: user1, lat: userData1.latitude, lng: userData1.longitude },
-          user2: { id: user2, lat: userData2.latitude, lng: userData2.longitude },
-        });
+        // Push only the opposite vehicle's location to the client
+        threatPositions.push({ id: user2, lat: userData2.latitude, lng: userData2.longitude });
       }
 
       console.log("🚨 All threat positions:", threatPositions);
