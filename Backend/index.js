@@ -127,8 +127,13 @@ wss.on("connection", (ws) => {
 
       const threatPositions = [];
       for (const [user1, user2] of threats) {
-        const userData1 = JSON.parse(await redisClient.get(`userData:${user1}`));
-        const userData2 = JSON.parse(await redisClient.get(`userData:${user2}`));
+        if (user1 !== data.userId) continue;
+
+        const userData1Raw = await redisClient.get(`userData:${user1}`);
+        const userData2Raw = await redisClient.get(`userData:${user2}`);
+        if (!userData1Raw || !userData2Raw) continue;
+        const userData1 = JSON.parse(userData1Raw);
+        const userData2 = JSON.parse(userData2Raw);
 
         threatPositions.push({
           user1: { id: user1, lat: userData1.latitude, lng: userData1.longitude },
