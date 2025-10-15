@@ -194,26 +194,18 @@ wss.on("connection", (ws) => {
       }
 
       const threatPositions = [];
-for (const [user1, user2] of threats) {
-  if (user1 !== data.userId) continue;
+      for (const [user1, user2] of threats) {
+        if (user1 !== data.userId) continue;
 
-  const userData2Raw = await redisClient.get(`userData:${user2}`);
-  if (!userData2Raw) continue;
-  const userData2 = JSON.parse(userData2Raw);
+        const userData1Raw = await redisClient.get(`userData:${user1}`);
+        const userData2Raw = await redisClient.get(`userData:${user2}`);
+        if (!userData1Raw || !userData2Raw) continue;
+        const userData1 = JSON.parse(userData1Raw);
+        const userData2 = JSON.parse(userData2Raw);
 
-  threatPositions.push({
-    id: user2,
-    lat: userData2.latitude,
-    lng: userData2.longitude,
-  });
-}
-
-<<<<<<< HEAD
         // Push only the opposite vehicle's location to the client
         threatPositions.push({ id: user2, lat: userData2.latitude, lng: userData2.longitude });
       }
-=======
->>>>>>> 5295f162728b82575069b5eca067cb2da9a4d801
 
       console.log("🚨 All threat positions:", threatPositions);
 
