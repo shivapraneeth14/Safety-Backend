@@ -62,7 +62,18 @@ wss.on("connection", (ws) => {
 
   ws.on("message", async (message) => {
     try {
-      const data = JSON.parse(message);
+      const raw = typeof message === "string" ? message : message?.toString?.() ?? "";
+      const data = JSON.parse(raw);
+      if (!data || typeof data.userId !== "string" || data.userId.trim() === "") {
+        console.error("❌ Missing or invalid userId in WebSocket payload. Raw:", raw);
+        ws.send(JSON.stringify({ status: "error", reason: "missing userId" }));
+        return;
+      }
+      if (typeof data.latitude !== "number" || typeof data.longitude !== "number") {
+        console.error("❌ Missing or invalid coordinates in WebSocket payload:", data);
+        ws.send(JSON.stringify({ status: "error", reason: "invalid coordinates" }));
+        return;
+      }
       console.log("📥 Incoming data:", data);
 
       await redisClient.geoAdd("users", {
@@ -103,8 +114,8 @@ wss.on("connection", (ws) => {
 
         const distance = getDistanceInMeters({ lat: projectedLat1, lng: projectedLng1 }, { lat: projectedLat2, lng: projectedLng2 });
 
-        const accelMagnitudeSelf = Math.sqrt(data.accel.x ** 2 + data.accel.y ** 2);
-        const accelMagnitudeOther = Math.sqrt(userInfo.accel.x ** 2 + userInfo.accel.y ** 2);
+        const accelMagnitudeSelf = Math.sqrt((data.accel?.x ?? 0) ** 2 + (data.accel?.y ?? 0) ** 2);
+        const accelMagnitudeOther = Math.sqrt((userInfo.accel?.x ?? 0) ** 2 + (userInfo.accel?.y ?? 0) ** 2);
         const projectedSpeedSelf = Math.max(data.speed + accelMagnitudeSelf * projectionTime, 0);
         const projectedSpeedOther = Math.max(userInfo.speed + accelMagnitudeOther * projectionTime, 0);
 
