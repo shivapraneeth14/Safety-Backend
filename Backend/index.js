@@ -60,13 +60,15 @@ function getDistanceInMeters(loc1, loc2) {
 // ---- Configurable thresholds (override via environment) ----
 const CONFIG = {
   NEARBY_RADIUS_METERS: Number(process.env.NEARBY_RADIUS_METERS ?? 75),
-  PROJECTION_TIME_SECONDS: Number(process.env.PROJECTION_TIME_SECONDS ?? 2),
-  THREAT_DISTANCE_METERS: Number(process.env.THREAT_DISTANCE_METERS ?? 12),
+  PROJECTION_TIME_SECONDS: Number(process.env.PROJECTION_TIME_SECONDS ?? 3),
+  THREAT_DISTANCE_METERS: Number(process.env.THREAT_DISTANCE_METERS ?? 15),
   MIN_MOVING_SPEED_MS: Number(process.env.MIN_MOVING_SPEED_MS ?? 0.1),
   ANGULAR_VEL_HIGH_DEG_S: Number(process.env.ANGULAR_VEL_HIGH_DEG_S ?? 45),
   UNCERTAINTY_INFLATION_METERS: Number(process.env.UNCERTAINTY_INFLATION_METERS ?? 5),
   BLIND_SPOT_RADIUS_BOOST_METERS: Number(process.env.BLIND_SPOT_RADIUS_BOOST_METERS ?? 8),
   STALE_MS: Number(process.env.STALE_MS ?? 4000),
+  TTC_MAX_SECONDS: Number(process.env.TTC_MAX_SECONDS ?? 3),
+  CLOSING_SPEED_STRONG_MS: Number(process.env.CLOSING_SPEED_STRONG_MS ?? 10),
 };
 
 function normalizeHeadingDeg(value) {
@@ -104,6 +106,49 @@ function projectPoint(latDeg, lonDeg, bearingDeg, distanceMeters) {
   if (lon2 > 180) lon2 -= 360;
   if (lon2 < -180) lon2 += 360;
   return { lat: lat2, lng: lon2 };
+}
+
+// Approximate local meters conversion around a reference latitude
+function degreesToMetersVector(refLatDeg, dLatDeg, dLonDeg) {
+  const metersPerDegLat = 111320; // approximate
+  const metersPerDegLon = 111320 * Math.cos((refLatDeg * Math.PI) / 180);
+  return {
+    x: dLonDeg * metersPerDegLon, // east
+    y: dLatDeg * metersPerDegLat, // north
+  };
+}
+
+// Compute TTC and closest point of approach in meters using relative motion in local ENU
+function computeTtcAndCpaMeters(self, other) {
+  // self, other: { lat, lng, speed, heading }
+  const refLat = self.lat;
+  const dLat = other.lat - self.lat;
+  const dLon = other.lng - self.lng;
+  const r = degreesToMetersVector(refLat, dLat, dLon); // relative position (other - self)
+
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const vSelf = {
+    x: (self.speed ?? 0) * Math.cos(toRad(self.heading ?? 0)),
+    y: (self.speed ?? 0) * Math.sin(toRad(self.heading ?? 0)),
+  };
+  const vOther = {
+    x: (other.speed ?? 0) * Math.cos(toRad(other.heading ?? 0)),
+    y: (other.speed ?? 0) * Math.sin(toRad(other.heading ?? 0)),
+  };
+  const v = { x: vOther.x - vSelf.x, y: vOther.y - vSelf.y }; // relative velocity (other - self)
+
+  const rDotV = r.x * v.x + r.y * v.y;
+  const vMag2 = v.x * v.x + v.y * v.y;
+  if (vMag2 <= 1e-6) {
+    return { ttc: Infinity, cpa: Math.hypot(r.x, r.y), closingSpeed: 0 };
+  }
+  // positive closing speed means approaching
+  const closingSpeed = -rDotV / Math.hypot(r.x, r.y);
+  let ttc = -rDotV / vMag2; // seconds until closest approach
+  if (ttc < 0) ttc = Infinity; // already diverging
+  const cpaVec = { x: r.x + v.x * ttc, y: r.y + v.y * ttc };
+  const cpa = Math.hypot(cpaVec.x, cpaVec.y);
+  return { ttc, cpa, closingSpeed };
 }
 
 wss.on("connection", (ws) => {
@@ -311,6 +356,7 @@ wss.on("connection", (ws) => {
         lng: t.currentOther.lng,
         cpa: t.cpa
       }));
+      
   
       console.log("🚨 All threat positions:", threatPositions);
       ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: threatPositions }));
