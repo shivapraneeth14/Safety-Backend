@@ -169,7 +169,7 @@ wss.on("connection", (ws) => {
         return;
       }
       console.log("📥 Incoming data:", data);
-  
+
       // Store geo + user data in Redis (same as before)
       await redisClient.geoAdd("users", {
         longitude: data.longitude,
@@ -192,7 +192,7 @@ wss.on("connection", (ws) => {
   
       const nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
       console.log(`🔎 Nearby users of ${data.userId}:`, nearbyUserIds);
-  
+
       // Build keys and fetch data in same order
       const otherIds = nearbyUserIds.filter(uid => uid !== data.userId);
       if (otherIds.length === 0) {
@@ -202,7 +202,7 @@ wss.on("connection", (ws) => {
   
       const keys = otherIds.map(uid => `userData:${uid}`);
       const usersData = await redisClient.mGet(keys);
-  
+
       // Helper: convert lat/lon delta into local meters (equirectangular approx)
       const metersPerDegLat = 111320; // approx
       function lonDegToMetersFactor(latDeg) {
@@ -273,10 +273,10 @@ wss.on("connection", (ws) => {
       for (let i = 0; i < otherIds.length; i++) {
         try {
           const uid = otherIds[i];
-          const userInfoRaw = usersData[i];
-          if (!userInfoRaw) continue;
-          const userInfo = JSON.parse(userInfoRaw);
-  
+        const userInfoRaw = usersData[i];
+        if (!userInfoRaw) continue;
+        const userInfo = JSON.parse(userInfoRaw);
+
           // Skip stale opponents
           const userInfoTs = new Date(userInfo.timestamp || 0).getTime();
           if (!Number.isFinite(userInfoTs) || now - userInfoTs > CONFIG.STALE_MS) continue;
@@ -357,7 +357,7 @@ wss.on("connection", (ws) => {
         cpa: t.cpa
       }));
       
-  
+
       console.log("🚨 All threat positions:", threatPositions);
       ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: threatPositions }));
       console.log("📤 Threat data sent to frontend");
