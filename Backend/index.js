@@ -33,6 +33,9 @@ const server = createServer(app);
 
 const wss = new WebSocketServer({ server });
 
+// Track active WebSocket connections by userId
+const userSockets = new Map();
+
 const redisClient = createClient({
   url: process.env.REDIS_URL, 
 });
@@ -158,19 +161,21 @@ wss.on("connection", (ws) => {
     try {
       const raw = typeof message === "string" ? message : message?.toString?.() ?? "";
       const data = JSON.parse(raw);
+
+      // Basic validation
       if (!data || typeof data.userId !== "string" || data.userId.trim() === "") {
-        console.error("❌ Missing or invalid userId in WebSocket payload. Raw:", raw);
         ws.send(JSON.stringify({ status: "error", reason: "missing userId" }));
         return;
       }
       if (typeof data.latitude !== "number" || typeof data.longitude !== "number") {
-        console.error("❌ Missing or invalid coordinates in WebSocket payload:", data);
         ws.send(JSON.stringify({ status: "error", reason: "invalid coordinates" }));
         return;
       }
-      console.log("📥 Incoming data:", data);
 
-      // Store geo + user data in Redis (same as before)
+      // Register this socket for this userId (so we can push alerts to them)
+      userSockets.set(data.userId, ws);
+
+      // Persist latest geo & payload in Redis
       await redisClient.geoAdd("users", {
         longitude: data.longitude,
         latitude: data.latitude,
@@ -178,196 +183,299 @@ wss.on("connection", (ws) => {
       });
       const ttl = data.speed > 5 ? 10 : 30;
       await redisClient.set(`userData:${data.userId}`, JSON.stringify(data), { EX: ttl });
-  
-      // Determine dynamic nearby radius (preserve your blind-spot boost behavior)
+
+      // dynamic nearby radius (keeps your earlier logic)
       const gyroZRaw = Number(data.gyro?.z ?? 0);
-      // If gyro likely in rad/s, convert to deg/s heuristically if small magnitude suggests rad units
       let gyroZDeg = gyroZRaw;
-      if (Math.abs(gyroZRaw) < 0.5) {
-        // likely rad/s -> convert
-        gyroZDeg = gyroZRaw * (180 / Math.PI);
-      }
+      if (Math.abs(gyroZRaw) < 0.5) gyroZDeg = gyroZRaw * (180 / Math.PI);
       const isSuddenTurn = Math.abs(gyroZDeg) >= CONFIG.ANGULAR_VEL_HIGH_DEG_S;
       const nearbyRadius = CONFIG.NEARBY_RADIUS_METERS + (isSuddenTurn ? CONFIG.BLIND_SPOT_RADIUS_BOOST_METERS : 0);
-  
-      const nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
-      console.log(`🔎 Nearby users of ${data.userId}:`, nearbyUserIds);
 
-      // Build keys and fetch data in same order
+      // fetch nearby users (members)
+      const nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
       const otherIds = nearbyUserIds.filter(uid => uid !== data.userId);
       if (otherIds.length === 0) {
         ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: [] }));
         return;
       }
-  
+
       const keys = otherIds.map(uid => `userData:${uid}`);
       const usersData = await redisClient.mGet(keys);
 
-      // Helper: convert lat/lon delta into local meters (equirectangular approx)
-      const metersPerDegLat = 111320; // approx
-      function lonDegToMetersFactor(latDeg) {
-        return Math.cos((latDeg * Math.PI) / 180) * 111320;
-      }
-  
-      // Helper: get current time-ms and skip stale
-      const now = Date.now();
-      const threats = [];
-  
-      // Our function to compute CPA between two straight-line motions.
-      // Positions are in meters in local frame; velocities are m/s.
-      function computeCPA(posA, velA, posB, velB, maxT) {
-        // relative pos and vel
-        const r0x = posA.x - posB.x;
-        const r0y = posA.y - posB.y;
-        const vx = velA.x - velB.x;
-        const vy = velA.y - velB.y;
-  
+      // helper functions
+      const deg2rad = d => (d * Math.PI) / 180;
+      const rad2deg = r => (r * 180) / Math.PI;
+      const haversineMeters = (lat1, lon1, lat2, lon2) => {
+        const R = 6371e3;
+        const φ1 = deg2rad(lat1), φ2 = deg2rad(lat2);
+        const Δφ = deg2rad(lat2 - lat1), Δλ = deg2rad(lon2 - lon1);
+        const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      };
+      const headingDiff = (h1, h2) => {
+        let d = Math.abs((h1 ?? 0) - (h2 ?? 0));
+        if (d > 180) d = 360 - d;
+        return d;
+      };
+
+      // compute CPA helper using local metric projection (works for short distances)
+      function computeCPA_local(selfPos, selfVel, otherPos, otherVel, maxT) {
+        const r0x = selfPos.x - otherPos.x;
+        const r0y = selfPos.y - otherPos.y;
+        const vx = selfVel.x - otherVel.x;
+        const vy = selfVel.y - otherVel.y;
         const vDotV = vx * vx + vy * vy;
         let tStar = 0;
-        if (vDotV <= 1e-6) {
-          tStar = 0; // nearly same velocity => CPA now
-        } else {
+        if (vDotV > 1e-6) {
           tStar = - (r0x * vx + r0y * vy) / vDotV;
           tStar = Math.max(0, Math.min(maxT, tStar));
         }
-  
-        const cpx = (posA.x + velA.x * tStar + posB.x + velB.x * tStar) / 2; // midpoint of positions at tStar (optional)
-        const cpy = (posA.y + velA.y * tStar + posB.y + velB.y * tStar) / 2;
-        const distX = (posA.x + velA.x * tStar) - (posB.x + velB.x * tStar);
-        const distY = (posA.y + velA.y * tStar) - (posB.y + velB.y * tStar);
-        const dist = Math.sqrt(distX * distX + distY * distY);
-  
-        return { tStar, dist, cpx, cpy, posAAtT: { x: posA.x + velA.x * tStar, y: posA.y + velA.y * tStar }, posBAtT: { x: posB.x + velB.x * tStar, y: posB.y + velB.y * tStar } };
+        const aPosX = selfPos.x + selfVel.x * tStar;
+        const aPosY = selfPos.y + selfVel.y * tStar;
+        const bPosX = otherPos.x + otherVel.x * tStar;
+        const bPosY = otherPos.y + otherVel.y * tStar;
+        const dist = Math.hypot(aPosX - bPosX, aPosY - bPosY);
+        return { tStar, dist, selfAtT: { x: aPosX, y: aPosY }, otherAtT: { x: bPosX, y: bPosY } };
       }
-  
-      // Convert one user's lat/lon & heading+speed to local pos/vel
-      function prepareState(refLat, user) {
-        const lat = user.latitude;
-        const lon = user.longitude;
-        const dlat = lat - refLat;
-        const avgLat = (refLat + lat) / 2;
-        const metersPerDegLon = lonDegToMetersFactor(avgLat);
-  
-        const x = dlat * metersPerDegLat; // north (+)
-        const y = (lon - data.longitude) * metersPerDegLon; // east (+)
-        // Wait — above uses data.longitude; we will build relative position from data as origin below.
-        return { lat, lon, x, y, metersPerDegLon, avgLat };
-      }
-  
-      // We'll compute everything relative to the incoming device `data` as origin
-      // prepare base factors
+
+      // We'll use the incoming device as origin in a local ENU frame (north=x, east=y)
       const baseLat = data.latitude;
       const baseLon = data.longitude;
-      const baseMetersPerDegLon = lonDegToMetersFactor(baseLat);
-  
-      // Build base pos and velocity for 'self' (data)
-      const headingSelfRad = ((normalizeHeadingDeg(Number(data.heading ?? 0))) * Math.PI) / 180;
+      const metersPerDegLat = 111320;
+      const metersPerDegLonBase = Math.cos(deg2rad(baseLat)) * 111320;
+
+      const headingSelf = normalizeHeadingDeg(Number(data.heading ?? 0));
+      const headingSelfRad = deg2rad(headingSelf);
       const speedSelf = Math.max(0, Number(data.speed ?? 0));
-      const velSelf = {
-        x: speedSelf * Math.cos(headingSelfRad), // north component (m/s)
-        y: speedSelf * Math.sin(headingSelfRad)  // east component (m/s)
-      };
-      // posSelf at origin (0,0) in meters relative frame
+      const velSelf = { x: speedSelf * Math.cos(headingSelfRad), y: speedSelf * Math.sin(headingSelfRad) };
       const posSelf = { x: 0, y: 0 };
-  
+
+      const now = Date.now();
+      const threats = [];
+
+      // thresholds (local variables, easy to tweak)
+      const MIN_SPEED_FOR_INTERSECTION = 2.78; // 10 km/h in m/s
+      const INTERSECTION_DIST_M = 8; // slightly wider threshold for intersection CPA
+      const REAR_TTC_THRESH = CONFIG.TTC_MAX_SECONDS ?? 3;
+      const REAR_CLOSING_SPEED_MIN = 0.5; // m/s closing speed to consider
+      const OVERTAKE_SIDE_MAX_M = 4; // lateral offset threshold for overtake
+      const WRONG_DIR_RADIUS_M = 30;
+
+      // Iterate nearby vehicles
       for (let i = 0; i < otherIds.length; i++) {
         try {
           const uid = otherIds[i];
-        const userInfoRaw = usersData[i];
-        if (!userInfoRaw) continue;
-        const userInfo = JSON.parse(userInfoRaw);
+          const raw = usersData[i];
+          if (!raw) continue;
+          const other = JSON.parse(raw);
 
-          // Skip stale opponents
-          const userInfoTs = new Date(userInfo.timestamp || 0).getTime();
-          if (!Number.isFinite(userInfoTs) || now - userInfoTs > CONFIG.STALE_MS) continue;
-  
-          // Compute relative position (meters) of userInfo from data position (origin)
-          const dLatDeg = userInfo.latitude - baseLat;
-          const dLonDeg = userInfo.longitude - baseLon;
-          const xOther = dLatDeg * metersPerDegLat; // north (m)
-          const yOther = dLonDeg * baseMetersPerDegLon; // east (m)
-  
-          // Build velocity vector for other (m/s) from its heading & speed
-          const headingOther = normalizeHeadingDeg(Number(userInfo.heading ?? 0));
-          const headingOtherRad = (headingOther * Math.PI) / 180;
-          const speedOther = Math.max(0, Number(userInfo.speed ?? 0));
-          const velOther = {
-            x: speedOther * Math.cos(headingOtherRad), // north component
-            y: speedOther * Math.sin(headingOtherRad)  // east component
-          };
-  
-          // Optionally inflate threshold by reported horizontalAccuracy (meters)
-          const horizAccSelf = Number(data.horizontalAccuracy ?? data.accuracy ?? 0);
-          const horizAccOther = Number(userInfo.horizontalAccuracy ?? userInfo.accuracy ?? 0);
-          const accInflation = (Number.isFinite(horizAccSelf) ? horizAccSelf : 0) + (Number.isFinite(horizAccOther) ? horizAccOther : 0) + CONFIG.UNCERTAINTY_INFLATION_METERS;
-  
-          // Compute CPA (max projection window = CONFIG.PROJECTION_TIME_SECONDS)
-          const cpa = computeCPA(posSelf, velSelf, { x: xOther, y: yOther }, velOther, CONFIG.PROJECTION_TIME_SECONDS);
-  
-          // If CPA distance below threat threshold + inflation AND both moving (above min speed) or one is high accel indicating collision
-          const effectiveThreatDistance = CONFIG.THREAT_DISTANCE_METERS + accInflation;
-  
-          const isMovingBoth = (speedSelf > CONFIG.MIN_MOVING_SPEED_MS) && (speedOther > CONFIG.MIN_MOVING_SPEED_MS);
-          // Check sudden decel events from accel (best-effort). Remove gravity estimate: if abs(z) ~9.8 then linear ≈ magnitude - 9.8
-          const accelSelfMag = Math.sqrt((data.accel?.x ?? 0) ** 2 + (data.accel?.y ?? 0) ** 2 + (data.accel?.z ?? 0) ** 2);
-          const accelOtherMag = Math.sqrt((userInfo.accel?.x ?? 0) ** 2 + (userInfo.accel?.y ?? 0) ** 2 + (userInfo.accel?.z ?? 0) ** 2);
-          const linAccSelf = Math.max(0, accelSelfMag - 9.5); // rough linear accel estimate
-          const linAccOther = Math.max(0, accelOtherMag - 9.5);
-  
-          // final decision: CPA distance less than threshold and either both moving or a strong accel event
-          if (cpa.dist <= effectiveThreatDistance && (isMovingBoth || linAccSelf > 3 || linAccOther > 3)) {
-            // convert CPA pos back to lat/lon for reporting
-            // pos (north meters) -> delta degrees lat = x / metersPerDegLat
-            const cpaLatSelf = baseLat + (cpa.posAAtT.x / metersPerDegLat);
-            const cpaLonSelf = baseLon + (cpa.posAAtT.y / baseMetersPerDegLon);
-  
-            const cpaLatOther = baseLat + (cpa.posBAtT.x / metersPerDegLat);
-            const cpaLonOther = baseLon + (cpa.posBAtT.y / baseMetersPerDegLon);
-  
-            // Prepare threat object
-            threats.push({
-              threatWith: uid,
-              currentOther: { id: uid, lat: userInfo.latitude, lng: userInfo.longitude },
-              cpa: {
-                timeToCPA_s: Number(cpa.tStar.toFixed(2)),
+          // Skip stale
+          const otherTs = new Date(other.timestamp || 0).getTime();
+          if (!Number.isFinite(otherTs) || now - otherTs > CONFIG.STALE_MS) continue;
+
+          // compute relative pos in meters
+          const dLat = other.latitude - baseLat;
+          const dLon = other.longitude - baseLon;
+          const xOther = dLat * metersPerDegLat; // north
+          const yOther = dLon * metersPerDegLonBase; // east
+          const posOther = { x: xOther, y: yOther };
+
+          // velocities from heading & speed
+          const headingOther = normalizeHeadingDeg(Number(other.heading ?? 0));
+          const headingOtherRad = deg2rad(headingOther);
+          const speedOther = Math.max(0, Number(other.speed ?? 0));
+          const velOther = { x: speedOther * Math.cos(headingOtherRad), y: speedOther * Math.sin(headingOtherRad) };
+
+          // geometric & kinematic metrics
+          const dist = haversineMeters(baseLat, baseLon, other.latitude, other.longitude);
+          const hdiff = headingDiff(headingSelf, headingOther);
+
+          // -------------- Intersection (T/L) detection --------------
+          // Condition: both moving > MIN_SPEED_FOR_INTERSECTION, heading roughly perpendicular,
+          // and their projected positions in PROJECTION_TIME_SECONDS are within INTERSECTION_DIST_M
+          if (speedSelf >= MIN_SPEED_FOR_INTERSECTION && speedOther >= MIN_SPEED_FOR_INTERSECTION && hdiff >= 60 && hdiff <= 120) {
+            const cpa = computeCPA_local(posSelf, velSelf, posOther, velOther, CONFIG.PROJECTION_TIME_SECONDS);
+            if (cpa.dist <= INTERSECTION_DIST_M && cpa.tStar <= (CONFIG.TTC_MAX_SECONDS ?? 3)) {
+              // send threat to self (source = other)
+              const payloadSelf = {
+                type: "intersection_collision",
+                sourceVehicle: { userId: other.userId ?? uid, latitude: other.latitude, longitude: other.longitude, speed: speedOther, heading: headingOther },
                 distance_m: Number(cpa.dist.toFixed(2)),
-                selfPosAtCPA: { lat: Number(cpaLatSelf.toFixed(7)), lng: Number(cpaLonSelf.toFixed(7)) },
-                otherPosAtCPA: { lat: Number(cpaLatOther.toFixed(7)), lng: Number(cpaLonOther.toFixed(7)) }
-              },
-              metadata: {
-                speedSelf: speedSelf,
-                speedOther: speedOther,
-                horizAccInflation_m: Number(accInflation.toFixed(2))
+                timeToCPA_s: Number(cpa.tStar.toFixed(2)),
+                message: "⚠️ Possible T/L intersection collision"
+              };
+              threats.push(payloadSelf);
+
+              // send alert to other vehicle as well (if connected)
+              const wsOther = userSockets.get(uid);
+              if (wsOther && wsOther.readyState === wsOther.OPEN) {
+                const payloadOther = {
+                  type: "intersection_collision",
+                  sourceVehicle: { userId: data.userId, latitude: data.latitude, longitude: data.longitude, speed: speedSelf, heading: headingSelf },
+                  distance_m: Number(cpa.dist.toFixed(2)),
+                  timeToCPA_s: Number(cpa.tStar.toFixed(2)),
+                  message: "⚠️ Possible T/L intersection collision"
+                };
+                wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
               }
-            });
-  
-            console.log(`⚠️ Threat detected between ${data.userId} and ${uid} — CPA dist ${cpa.dist.toFixed(2)}m in ${cpa.tStar.toFixed(2)}s`);
+              // continue to next other vehicle (already flagged)
+              continue;
+            }
           }
+
+          // -------------- Rear-end detection (front/back) --------------
+          // Use CPA + TTC/closing speed to infer risk of rear collision.
+          // If vehicles are approximately aligned (heading diff < 30),
+          // and relative motion projects a small TTC and closing speed > threshold -> rear risk
+          if (hdiff <= 30) {
+            const cpaRear = computeCPA_local(posSelf, velSelf, posOther, velOther, CONFIG.PROJECTION_TIME_SECONDS);
+            // compute approximate closing speed along line of approach
+            // closingSpeed approx = (relative position) dot (relative velocity) / distance (signed)
+            const r = { x: posOther.x - posSelf.x, y: posOther.y - posSelf.y };
+            const vrel = { x: velOther.x - velSelf.x, y: velOther.y - velSelf.y };
+            const rMag = Math.hypot(r.x, r.y);
+            let closingSpeed = 0;
+            if (rMag > 0.001) {
+              closingSpeed = - (r.x * vrel.x + r.y * vrel.y) / rMag; // positive => approaching
+            }
+            if (closingSpeed > REAR_CLOSING_SPEED_MIN && cpaRear.tStar <= REAR_TTC_THRESH && cpaRear.dist <= CONFIG.THREAT_DISTANCE_METERS + CONFIG.UNCERTAINTY_INFLATION_METERS) {
+              // Determine which is front and which is rear by projecting relative long component along self heading
+              const alongSelf = r.x * Math.cos(headingSelfRad) + r.y * Math.sin(headingSelfRad); // >0 => other ahead of self
+
+              const wsOther = userSockets.get(uid);
+              if (alongSelf > 0) {
+                // Self is trailing, warn self; inform other that a vehicle behind is closing
+                const payloadSelf = {
+                  type: "rear_collision",
+                  sourceVehicle: { userId: other.userId ?? uid, latitude: other.latitude, longitude: other.longitude, speed: speedOther, heading: headingOther },
+                  distance_m: Number(cpaRear.dist.toFixed(2)),
+                  timeToCPA_s: Number(cpaRear.tStar.toFixed(2)),
+                  message: "🚨 Risk of rear-end collision — vehicle ahead is slowing / you are closing fast"
+                };
+                threats.push(payloadSelf);
+
+                if (wsOther && wsOther.readyState === wsOther.OPEN) {
+                  const payloadOther = {
+                    type: "rear_collision",
+                    sourceVehicle: { userId: data.userId, latitude: data.latitude, longitude: data.longitude, speed: speedSelf, heading: headingSelf },
+                    distance_m: Number(cpaRear.dist.toFixed(2)),
+                    timeToCPA_s: Number(cpaRear.tStar.toFixed(2)),
+                    message: "🚨 Risk of rear-end collision — vehicle behind is closing fast"
+                  };
+                  wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+                }
+              } else {
+                // Self is leading, warn the trailing other; do not push a rear alert to self
+                if (wsOther && wsOther.readyState === wsOther.OPEN) {
+                  const payloadOther = {
+                    type: "rear_collision",
+                    sourceVehicle: { userId: data.userId, latitude: data.latitude, longitude: data.longitude, speed: speedSelf, heading: headingSelf },
+                    distance_m: Number(cpaRear.dist.toFixed(2)),
+                    timeToCPA_s: Number(cpaRear.tStar.toFixed(2)),
+                    message: "🚨 Risk of rear-end collision — you are closing fast on a vehicle ahead"
+                  };
+                  wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+                }
+              }
+              continue;
+            }
+          }
+
+          // -------------- Wrong-direction detection --------------
+          // If headings differ by almost 180 and within a reasonable radius => wrong way
+          if (hdiff >= 150 && dist <= WRONG_DIR_RADIUS_M && (speedSelf > CONFIG.MIN_MOVING_SPEED_MS || speedOther > CONFIG.MIN_MOVING_SPEED_MS)) {
+            const payloadSelf = {
+              type: "wrong_direction",
+              sourceVehicle: { userId: other.userId ?? uid, latitude: other.latitude, longitude: other.longitude, speed: speedOther, heading: headingOther },
+              distance_m: Number(dist.toFixed(2)),
+              message: "🚫 Vehicle going in opposite direction"
+            };
+            threats.push(payloadSelf);
+
+            const wsOther = userSockets.get(uid);
+            if (wsOther && wsOther.readyState === wsOther.OPEN) {
+              const payloadOther = {
+                type: "wrong_direction",
+                sourceVehicle: { userId: data.userId, latitude: data.latitude, longitude: data.longitude, speed: speedSelf, heading: headingSelf },
+                distance_m: Number(dist.toFixed(2)),
+                message: "🚫 Nearby vehicle moving in opposite direction"
+              };
+              wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+            }
+            continue;
+          }
+
+          // -------------- Overtake detection --------------
+          // If both roughly same heading, other is faster by margin, and lateral offset small -> overtaking
+          if (hdiff <= 20 && dist <= 12 && speedOther > speedSelf + 1.5) {
+            // lateral offset measured as magnitude of component orthogonal to self heading
+            const unitAlongX = Math.cos(headingSelfRad), unitAlongY = Math.sin(headingSelfRad);
+            const relX = posOther.x - posSelf.x, relY = posOther.y - posSelf.y;
+            // lateral = cross-product magnitude = |r x along|
+            const lateral = Math.abs(relX * unitAlongY - relY * unitAlongX);
+            if (lateral <= OVERTAKE_SIDE_MAX_M) {
+              // Require approaching with small TTC to reduce false-positives in slow traffic
+              const cpaOver = computeCPA_local(posSelf, velSelf, posOther, velOther, CONFIG.PROJECTION_TIME_SECONDS);
+              const vrelX = velOther.x - velSelf.x, vrelY = velOther.y - velSelf.y;
+              const rMag2 = relX * relX + relY * relY;
+              let closing = 0;
+              if (rMag2 > 1e-6) {
+                const rMag = Math.sqrt(rMag2);
+                closing = - (relX * vrelX + relY * vrelY) / rMag; // positive => approaching
+              }
+              if (!(closing > 0.3 && cpaOver.tStar <= 2)) {
+                // not a strong/near-term overtake; skip
+                continue;
+              }
+              const payloadSelf = {
+                type: "overtake",
+                sourceVehicle: { userId: other.userId ?? uid, latitude: other.latitude, longitude: other.longitude, speed: speedOther, heading: headingOther },
+                distance_m: Number(dist.toFixed(2)),
+                lateral_m: Number(lateral.toFixed(2)),
+                message: "⚡ Vehicle overtaking from side"
+              };
+              threats.push(payloadSelf);
+
+              const wsOther = userSockets.get(uid);
+              if (wsOther && wsOther.readyState === wsOther.OPEN) {
+                const payloadOther = {
+                  type: "overtake",
+                  sourceVehicle: { userId: data.userId, latitude: data.latitude, longitude: data.longitude, speed: speedSelf, heading: headingSelf },
+                  distance_m: Number(dist.toFixed(2)),
+                  lateral_m: Number(lateral.toFixed(2)),
+                  message: "⚡ Overtaking detected near vehicle"
+                };
+                wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+              }
+              continue;
+            }
+          }
+
+          // no threat detected for this other vehicle -> continue
         } catch (innerErr) {
           console.error("❌ Error processing nearby user:", otherIds[i], innerErr);
-          continue;
         }
-      }
-  
-      // Send only the threats where the origin was the sender (data.userId)
-      const threatPositions = threats.map(t => ({
-        id: t.currentOther.id,
-        lat: t.currentOther.lat,
-        lng: t.currentOther.lng,
-        cpa: t.cpa
-      }));
-      
+      } // end for loop otherIds
 
-      console.log("🚨 All threat positions:", threatPositions);
-      ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: threatPositions }));
-      console.log("📤 Threat data sent to frontend");
+      // send accumulated threats back to the origin sender (data.userId)
+      // format: array of threat objects containing sourceVehicle latitude/longitude & metadata
+      ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats }));
+
     } catch (err) {
       console.error("❌ WebSocket message handling error:", err);
     }
   });
-  
 
-  ws.on("close", () => console.log("❌ WebSocket client disconnected"));
+  ws.on("close", () => {
+    // cleanup - remove socket from userSockets map
+    for (const [uid, socket] of userSockets.entries()) {
+      if (socket === ws) {
+        userSockets.delete(uid);
+        break;
+      }
+    }
+    console.log("❌ WebSocket client disconnected");
+  });
 });
 
 
