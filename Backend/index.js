@@ -10,6 +10,12 @@ import { createClient } from "redis";
 dotenv.config();
 const app = express();
 
+// Ultra-verbose logging support
+const VERBOSE_LOG = process.env.VERBOSE_LOG === "1";
+function vlog(...args) {
+  if (VERBOSE_LOG) console.log(...args);
+}
+
 app.use(
   cors({
     origin: process.env.CLIENT_ORIGIN || "*",
@@ -44,6 +50,7 @@ redisClient.on("error", (err) => console.error("❌ Redis Error:", err));
 
 await redisClient.connect();
 console.log("✅ Connected to Redis"); 
+vlog("🔧 VERBOSE_LOG is", VERBOSE_LOG ? "ENABLED" : "DISABLED");
 
 function getDistanceInMeters(loc1, loc2) {
   const R = 6371e3; // Earth radius in meters
@@ -160,7 +167,9 @@ wss.on("connection", (ws) => {
   ws.on("message", async (message) => {
     try {
       const raw = typeof message === "string" ? message : message?.toString?.() ?? "";
+      console.log("📥 Incoming WS raw:", raw);
       const data = JSON.parse(raw);
+      vlog("🧾 Parsed:", data);
 
       // Basic validation
       if (!data || typeof data.userId !== "string" || data.userId.trim() === "") {
@@ -171,9 +180,11 @@ wss.on("connection", (ws) => {
         ws.send(JSON.stringify({ status: "error", reason: "invalid coordinates" }));
         return;
       }
+      vlog("✅ Validated userId", data.userId, "coords", data.latitude, data.longitude, "speed", data.speed, "heading", data.heading);
 
       // Register this socket for this userId (so we can push alerts to them)
       userSockets.set(data.userId, ws);
+      vlog("🔗 Registered socket for", data.userId);
 
       // Persist latest geo & payload in Redis
       await redisClient.geoAdd("users", {
@@ -183,6 +194,7 @@ wss.on("connection", (ws) => {
       });
       const ttl = data.speed > 5 ? 10 : 30;
       await redisClient.set(`userData:${data.userId}`, JSON.stringify(data), { EX: ttl });
+      vlog("🗂️ Redis updated: GEOADD + SET", { member: data.userId, ttl });
 
       // dynamic nearby radius (keeps your earlier logic)
       const gyroZRaw = Number(data.gyro?.z ?? 0);
@@ -190,17 +202,21 @@ wss.on("connection", (ws) => {
       if (Math.abs(gyroZRaw) < 0.5) gyroZDeg = gyroZRaw * (180 / Math.PI);
       const isSuddenTurn = Math.abs(gyroZDeg) >= CONFIG.ANGULAR_VEL_HIGH_DEG_S;
       const nearbyRadius = CONFIG.NEARBY_RADIUS_METERS + (isSuddenTurn ? CONFIG.BLIND_SPOT_RADIUS_BOOST_METERS : 0);
+      vlog("🧭 Gyro.z(deg/s)", Number(gyroZDeg.toFixed?.(2) ?? gyroZDeg), "isSuddenTurn", isSuddenTurn, "nearbyRadius(m)", nearbyRadius);
 
       // fetch nearby users (members)
       const nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
+      vlog("🔎 Nearby members:", nearbyUserIds);
       const otherIds = nearbyUserIds.filter(uid => uid !== data.userId);
       if (otherIds.length === 0) {
         ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: [] }));
         return;
       }
+      vlog("👥 Other IDs:", otherIds);
 
       const keys = otherIds.map(uid => `userData:${uid}`);
       const usersData = await redisClient.mGet(keys);
+      vlog("📦 mGET keys:", keys);
 
       // helper functions
       const deg2rad = d => (d * Math.PI) / 180;
@@ -249,6 +265,7 @@ wss.on("connection", (ws) => {
       const speedSelf = Math.max(0, Number(data.speed ?? 0));
       const velSelf = { x: speedSelf * Math.cos(headingSelfRad), y: speedSelf * Math.sin(headingSelfRad) };
       const posSelf = { x: 0, y: 0 };
+      vlog("🚗 Self:", { headingSelf, speedSelf, velSelf, posSelf });
 
       const now = Date.now();
       const threats = [];
@@ -268,10 +285,14 @@ wss.on("connection", (ws) => {
           const raw = usersData[i];
           if (!raw) continue;
           const other = JSON.parse(raw);
+          vlog("➡️ Other payload", uid, other);
 
           // Skip stale
           const otherTs = new Date(other.timestamp || 0).getTime();
-          if (!Number.isFinite(otherTs) || now - otherTs > CONFIG.STALE_MS) continue;
+          if (!Number.isFinite(otherTs) || now - otherTs > CONFIG.STALE_MS) {
+            vlog("⏳ Skip stale", uid, "age(ms)", Number.isFinite(otherTs) ? (now - otherTs) : "invalid");
+            continue;
+          }
 
           // compute relative pos in meters
           const dLat = other.latitude - baseLat;
@@ -279,22 +300,26 @@ wss.on("connection", (ws) => {
           const xOther = dLat * metersPerDegLat; // north
           const yOther = dLon * metersPerDegLonBase; // east
           const posOther = { x: xOther, y: yOther };
+          vlog("📐 Rel pos(m)", posOther);
 
           // velocities from heading & speed
           const headingOther = normalizeHeadingDeg(Number(other.heading ?? 0));
           const headingOtherRad = deg2rad(headingOther);
           const speedOther = Math.max(0, Number(other.speed ?? 0));
           const velOther = { x: speedOther * Math.cos(headingOtherRad), y: speedOther * Math.sin(headingOtherRad) };
+          vlog("🚙 Other:", { headingOther, speedOther, velOther });
 
           // geometric & kinematic metrics
           const dist = haversineMeters(baseLat, baseLon, other.latitude, other.longitude);
           const hdiff = headingDiff(headingSelf, headingOther);
+          vlog("📏 dist(m)", Number(dist.toFixed(2)), "hdiff(deg)", hdiff);
 
           // -------------- Intersection (T/L) detection --------------
           // Condition: both moving > MIN_SPEED_FOR_INTERSECTION, heading roughly perpendicular,
           // and their projected positions in PROJECTION_TIME_SECONDS are within INTERSECTION_DIST_M
           if (speedSelf >= MIN_SPEED_FOR_INTERSECTION && speedOther >= MIN_SPEED_FOR_INTERSECTION && hdiff >= 60 && hdiff <= 120) {
             const cpa = computeCPA_local(posSelf, velSelf, posOther, velOther, CONFIG.PROJECTION_TIME_SECONDS);
+            vlog("🧮 INTERSECTION CPA", { tStar: Number(cpa.tStar.toFixed(2)), dist: Number(cpa.dist.toFixed(2)) });
             if (cpa.dist <= INTERSECTION_DIST_M && cpa.tStar <= (CONFIG.TTC_MAX_SECONDS ?? 3)) {
               // send threat to self (source = other)
               const payloadSelf = {
@@ -338,9 +363,11 @@ wss.on("connection", (ws) => {
             if (rMag > 0.001) {
               closingSpeed = - (r.x * vrel.x + r.y * vrel.y) / rMag; // positive => approaching
             }
+            vlog("🧮 REAR CPA", { tStar: Number(cpaRear.tStar.toFixed(2)), dist: Number(cpaRear.dist.toFixed(2)), closingSpeed: Number(closingSpeed.toFixed(2)) });
             if (closingSpeed > REAR_CLOSING_SPEED_MIN && cpaRear.tStar <= REAR_TTC_THRESH && cpaRear.dist <= CONFIG.THREAT_DISTANCE_METERS + CONFIG.UNCERTAINTY_INFLATION_METERS) {
               // Determine which is front and which is rear by projecting relative long component along self heading
               const alongSelf = r.x * Math.cos(headingSelfRad) + r.y * Math.sin(headingSelfRad); // >0 => other ahead of self
+              vlog("🧭 REAR alongSelf", Number(alongSelf.toFixed(2)));
 
               const wsOther = userSockets.get(uid);
               if (alongSelf > 0) {
@@ -423,6 +450,7 @@ wss.on("connection", (ws) => {
                 const rMag = Math.sqrt(rMag2);
                 closing = - (relX * vrelX + relY * vrelY) / rMag; // positive => approaching
               }
+              vlog("🧮 OVERTAKE metrics", { lateral: Number(lateral.toFixed(2)), tStar: Number(cpaOver.tStar.toFixed(2)), closing: Number(closing.toFixed(2)) });
               if (!(closing > 0.3 && cpaOver.tStar <= 2)) {
                 // not a strong/near-term overtake; skip
                 continue;
@@ -459,6 +487,7 @@ wss.on("connection", (ws) => {
 
       // send accumulated threats back to the origin sender (data.userId)
       // format: array of threat objects containing sourceVehicle latitude/longitude & metadata
+      vlog("📤 Sender threats count", threats.length);
       ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats }));
 
     } catch (err) {
