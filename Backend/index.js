@@ -345,11 +345,23 @@ wss.on("connection", (ws) => {
             if (dPred <= COLLISION_RADIUS) {
               const payloadSelf = {
                 type: "predicted_collision",
-                sourceVehicle: { userId: other.userId ?? uid, latitude: other.latitude, longitude: other.longitude, speed: speedOther, heading: headingOther },
+                id: other.userId ?? uid,                // ⭐ REQUIRED BY FLUTTER
+                lat: other.latitude,                    // ⭐ REQUIRED BY FLUTTER
+                lng: other.longitude,                   // ⭐ REQUIRED BY FLUTTER
+            
+                // original metadata preserved
+                sourceVehicle: {
+                    userId: other.userId ?? uid,
+                    latitude: other.latitude,
+                    longitude: other.longitude,
+                    speed: speedOther,
+                    heading: headingOther
+                },
                 future_distance_m: Number(dPred.toFixed(2)),
                 time_s: t,
                 message: "⚠️ Predicted collision based on future paths"
-              };
+            };
+            
               console.log("🚨 PREDICTED COLLISION detected:", payloadSelf);
               threats.push(payloadSelf);
 
@@ -357,11 +369,22 @@ wss.on("connection", (ws) => {
               if (wsOther && wsOther.readyState === wsOther.OPEN) {
                 const payloadOther = {
                   type: "predicted_collision",
-                  sourceVehicle: { userId: data.userId, latitude: data.latitude, longitude: data.longitude, speed: speedSelf, heading: headingSelf },
+                  id: data.userId,
+                  lat: data.latitude,
+                  lng: data.longitude,
+              
+                  sourceVehicle: {
+                      userId: data.userId,
+                      latitude: data.latitude,
+                      longitude: data.longitude,
+                      speed: speedSelf,
+                      heading: headingSelf
+                  },
                   future_distance_m: Number(dPred.toFixed(2)),
                   time_s: t,
                   message: "⚠️ Predicted collision based on future paths"
-                };
+              };
+              
                 try {
                   wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
                   console.log(`📣 Sent predicted_collision to other ${uid}`);
@@ -389,11 +412,22 @@ wss.on("connection", (ws) => {
             if (decel >= SUDDEN_DECEL && relativeDist <= REAR_END_DISTANCE && closingSpeed > 0.5) {
               const payloadSelf = {
                 type: "rear_end",
-                sourceVehicle: { userId: other.userId ?? uid, speed: speedOther, heading: headingOther },
+                id: other.userId ?? uid,
+                lat: other.latitude,
+                lng: other.longitude,
+            
+                sourceVehicle: {
+                    userId: other.userId ?? uid,
+                    latitude: other.latitude,
+                    longitude: other.longitude,
+                    speed: speedOther,
+                    heading: headingOther
+                },
                 distance_m: Number(relativeDist.toFixed(2)),
                 deceleration: Number(decel.toFixed(2)),
                 message: "🚨 Rear-end danger! Front vehicle is braking hard"
-              };
+            };
+            
               console.log("🚨 REAR-END threat:", payloadSelf);
               threats.push(payloadSelf);
 
@@ -401,11 +435,22 @@ wss.on("connection", (ws) => {
               if (wsOther && wsOther.readyState === wsOther.OPEN) {
                 const payloadOther = {
                   type: "rear_end",
-                  sourceVehicle: { userId: data.userId, speed: speedSelf, heading: headingSelf },
+                  id: data.userId,
+                  lat: data.latitude,
+                  lng: data.longitude,
+              
+                  sourceVehicle: {
+                      userId: data.userId,
+                      latitude: data.latitude,
+                      longitude: data.longitude,
+                      speed: speedSelf,
+                      heading: headingSelf
+                  },
                   distance_m: Number(relativeDist.toFixed(2)),
                   deceleration: Number(decel.toFixed(2)),
                   message: "🚨 Vehicle behind may hit you"
-                };
+              };
+              
                 try {
                   wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
                   console.log(`📣 Sent rear_end to other ${uid}`);
@@ -425,10 +470,20 @@ wss.on("connection", (ws) => {
           if (headingDifferenceFromMajority >= WRONG_DIR_DIFF && distNow <= 40) {
             const payloadSelf = {
               type: "wrong_direction",
-              sourceVehicle: { userId: other.userId ?? uid, heading: headingOther, latitude: other.latitude, longitude: other.longitude },
+              id: other.userId ?? uid,
+              lat: other.latitude,
+              lng: other.longitude,
+          
+              sourceVehicle: {
+                  userId: other.userId ?? uid,
+                  latitude: other.latitude,
+                  longitude: other.longitude,
+                  heading: headingOther
+              },
               distance_m: Number(distNow.toFixed(2)),
               message: "🚫 Vehicle traveling in opposite direction"
-            };
+          };
+          
             console.log("🚨 WRONG DIRECTION threat:", payloadSelf);
             threats.push(payloadSelf);
 
@@ -436,10 +491,20 @@ wss.on("connection", (ws) => {
             if (wsOther && wsOther.readyState === wsOther.OPEN) {
               const payloadOther = {
                 type: "wrong_direction",
-                sourceVehicle: { userId: data.userId, heading: headingSelf },
+                id: data.userId,
+                lat: data.latitude,
+                lng: data.longitude,
+            
+                sourceVehicle: {
+                    userId: data.userId,
+                    latitude: data.latitude,
+                    longitude: data.longitude,
+                    heading: headingSelf
+                },
                 distance_m: Number(distNow.toFixed(2)),
                 message: "🚫 You are going opposite to traffic"
-              };
+            };
+            
               try {
                 wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
                 console.log(`📣 Sent wrong_direction to other ${uid}`);
