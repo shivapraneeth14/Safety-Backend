@@ -70,7 +70,11 @@ const CONFIG = {
   STALE_MS: Number(process.env.STALE_MS ?? 4000),
   TTC_MAX_SECONDS: Number(process.env.TTC_MAX_SECONDS ?? 3),
   CLOSING_SPEED_STRONG_MS: Number(process.env.CLOSING_SPEED_STRONG_MS ?? 10),
+  
 };
+
+// Minimum speed (m/s) required to run predicted-collision logic (5 km/h = 1.388... m/s)
+const MIN_PREDICT_COLLISION_SPEED = 1.38; // 5 km/h in m/s
 
 function normalizeHeadingDeg(value) {
   if (!Number.isFinite(value)) return 0;
@@ -334,6 +338,13 @@ wss.on("connection", (ws) => {
 
           // LOG distance & heading diff
           console.log(`📏 [${data.userId} ↔ ${uid}] distNow=${distNow.toFixed(2)}m headingDiff=${hdiff}° speedSelf=${speedSelf} speedOther=${speedOther}`);
+
+          // 🔒 Only detect predicted collision when at least one vehicle is above 5 km/h
+          if (speedSelf < MIN_PREDICT_COLLISION_SPEED && speedOther < MIN_PREDICT_COLLISION_SPEED) {
+            console.log(`⛔ Skipping predicted collision: both too slow (<5km/h).`);
+            // Continue to next vehicle, skipping predicted collision
+            continue;
+          }
 
           // 1) Predicted collision check
           let collisionDetected = false;
