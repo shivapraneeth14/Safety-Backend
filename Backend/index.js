@@ -338,6 +338,97 @@ wss.on("connection", (ws) => {
 
           // LOG distance & heading diff
           console.log(`📏 [${data.userId} ↔ ${uid}] distNow=${distNow.toFixed(2)}m headingDiff=${hdiff}° speedSelf=${speedSelf} speedOther=${speedOther}`);
+        // ----------------------------------------------------
+// TURN COLLISION DETECTION (NEW)
+// ----------------------------------------------------
+try {
+  const selfTurn = data.turnAhead === true;
+  const otherTurn = other.turnAhead === true;
+
+  // Only run if both vehicles detected a turn AND speeds > 5 km/h
+  if (
+    selfTurn &&
+    otherTurn &&
+    data.intersectionLat != null &&
+    other.intersectionLat != null &&
+    speedSelf > MIN_PREDICT_COLLISION_SPEED &&
+    speedOther > MIN_PREDICT_COLLISION_SPEED
+  ) {
+    const turnA = {
+      lat: data.intersectionLat,
+      lng: data.intersectionLng,
+    };
+
+    const turnB = {
+      lat: other.intersectionLat,
+      lng: other.intersectionLng,
+    };
+
+    // 1) Check if both vehicles have the SAME turn (within ~8 meters)
+    const turnDist = haversineMeters(
+      turnA.lat, turnA.lng,
+      turnB.lat, turnB.lng
+    );
+
+    if (turnDist <= 8) {
+      // Distance from each vehicle to the turn
+      const distSelfToTurn = haversineMeters(
+        baseLat, baseLon,
+        turnA.lat, turnA.lng
+      );
+
+      const distOtherToTurn = haversineMeters(
+        other.latitude, other.longitude,
+        turnA.lat, turnA.lng
+      );
+
+      // Time (seconds) to reach the turn
+      const etaSelf = distSelfToTurn / (speedSelf + 0.1);
+      const etaOther = distOtherToTurn / (speedOther + 0.1);
+      console.log("TURN DATA RECEIVED:", data.intersectionLat, data.intersectionLng)
+console.log("TURN MATCH DISTANCE:", turnDist)
+console.log("TURN ETA SELF:", etaSelf)
+console.log("TURN ETA OTHER:", etaOther)
+
+      // Collision risk if both reach within 2 seconds window
+      if (Math.abs(etaSelf - etaOther) <= 2.0) {
+        const payloadSelf = {
+          type: "turn_collision",
+          id: other.userId ?? uid,
+          lat: other.latitude,
+          lng: other.longitude,
+          intersectionLat: turnA.lat,
+          intersectionLng: turnA.lng,
+          message: "⚠️ Collision risk at turn ahead",
+        };
+
+        threats.push(payloadSelf);
+        console.log("🚨 TURN COLLISION THREAT (SELF):", payloadSelf);
+
+        // Notify other vehicle
+        const wsOther = userSockets.get(uid);
+        if (wsOther && wsOther.readyState === wsOther.OPEN) {
+          const payloadOther = {
+            type: "turn_collision",
+            id: data.userId,
+            lat: data.latitude,
+            lng: data.longitude,
+            intersectionLat: turnA.lat,
+            intersectionLng: turnA.lng,
+            message: "⚠️ Collision risk at turn ahead",
+          };
+
+          wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+          console.log("📣 Sent TURN COLLISION to:", uid);
+        }
+      }
+    }
+  }
+} catch (e) {
+  console.error("❌ Turn collision logic error:", e);
+}
+// ----------------------------------------------------
+
 
           // 🔒 Only detect predicted collision when at least one vehicle is above 5 km/h
           if (speedSelf < MIN_PREDICT_COLLISION_SPEED && speedOther < MIN_PREDICT_COLLISION_SPEED) {
