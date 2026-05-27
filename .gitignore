@@ -6,7 +6,8 @@ Backend/.env
 Backend/npm-debug.log*
 Backend/yarn-debug.log*
 Backend/yarn-error.log*
-Backend/package-lock.json
+Backend/data/
+# Backend/package-lock.json
 
 # -----------------------------
 # Optional Frontend (if added later)

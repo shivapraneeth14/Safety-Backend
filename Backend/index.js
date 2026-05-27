@@ -7,6 +7,7 @@ import router from "./Routes/User.routes.js";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { createClient } from "redis";
+import Road from "./Models/Road.Model.js";
 
 dotenv.config();
 const app = express();
@@ -28,6 +29,49 @@ app.get("/", (req, res) => {
 app.post("/api/test", (req, res) => {
   console.log("📨 POST /api/test hit with data:", req.body);
   res.json({ message: "Test route works" });
+});
+
+app.get("/api/nearby-roads", async (req, res) => {
+  try {
+    const { lat, lon, radius } = req.query;
+    const latNum = parseFloat(lat);
+    const lonNum = parseFloat(lon);
+    const radiusNum = parseInt(radius || "60", 10);
+
+    if (isNaN(latNum) || isNaN(lonNum)) {
+      return res.status(400).json({ error: "Invalid lat/lon" });
+    }
+
+    const roads = await Road.find({
+      geometry: {
+        $near: {
+          $geometry: { type: "Point", coordinates: [lonNum, latNum] },
+          $maxDistance: radiusNum,
+        },
+      },
+    }).limit(30).lean();
+
+    const elements = roads.map((r) => ({
+      type: "way",
+      id: r.osmId,
+      nodes: [],
+      tags: {
+        highway: r.highway,
+        name: r.name || undefined,
+        oneway: r.oneway || undefined,
+      },
+      geometry: r.geometry.coordinates.map((c) => ({
+        lat: c[1],
+        lon: c[0],
+      })),
+    }));
+
+    console.log(`🗺️ nearby-roads: ${elements.length} roads near ${latNum},${lonNum}`);
+    res.json({ elements });
+  } catch (err) {
+    console.error("❌ nearby-roads error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
 const server = createServer(app);
