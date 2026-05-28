@@ -27,6 +27,11 @@ const userSchema = new mongoose.Schema({
     refreshToken: {
       type: String,
     },
+    vehicleType: {
+      type: String,
+      enum: ["two-wheeler", "four-wheeler", "other"],
+      default: "two-wheeler",
+    },
   },
   { timestamps: true })
 userSchema.methods.isPasswordCorrect = async function(password) {
@@ -40,13 +45,13 @@ userSchema.methods.generateAccessToken = function () {
         _id: this._id,
         username: this.username,
         email: this.email
-    }, process.env.ACCESS_TOKEN_SECRET);
+    }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '15m' });
 };
 
 userSchema.methods.generateRefreshToken = function () {
     return jwt.sign({
         _id: this._id
-    }, process.env.REFRESH_TOKEN_SECRET);
+    }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '7d' });
 };
 const User = mongoose.model("User",userSchema)
 

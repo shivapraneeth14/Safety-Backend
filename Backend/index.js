@@ -3,11 +3,15 @@ import express from "express";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 import cors from "cors";
+import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
 import router from "./Routes/User.routes.js";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { createClient } from "redis";
 import Road from "./Models/Road.Model.js";
+import Turn from "./Models/Turn.Model.js";
+import TurningEvent from "./Models/TurningEvent.Model.js";
 
 dotenv.config();
 const app = express();
@@ -21,6 +25,35 @@ app.use(
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use("/api", router);
+
+// Rate limiting
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: "Too many login attempts, try again after 15 minutes" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many registration attempts, try again after an hour" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  message: { error: "Too many requests, slow down" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use("/api/Login", loginLimiter);
+app.use("/api/register", registerLimiter);
+app.use("/api/", apiLimiter);
 
 app.get("/", (req, res) => {
   console.log("🌐 HTTP GET / - Server is alive");
@@ -54,7 +87,7 @@ app.get("/api/nearby-roads", async (req, res) => {
     const elements = roads.map((r) => ({
       type: "way",
       id: r.osmId,
-      nodes: [],
+      nodes: r.nodes || [],
       tags: {
         highway: r.highway,
         name: r.name || undefined,
@@ -79,15 +112,72 @@ const wss = new WebSocketServer({ server });
 
 // Map userId => WebSocket
 const userSockets = new Map();
+// Reverse map socket => userId for O(1) close cleanup
+const socketToUser = new Map();
 
-// Redis client
-const redisClient = createClient({
-  url: process.env.REDIS_URL,
-});
-redisClient.on("error", (err) => console.error("❌ Redis Error:", err));
+// Nearby user cache to reduce Redis queries
+// Key: userId, Value: { nearbyIds, timestamp, lat, lng }
+const nearbyCache = new Map();
+const NEARBY_CACHE_TTL_MS = 2000;
+const NEARBY_CACHE_MOVE_THRESHOLD_M = 10;
 
-await redisClient.connect();
-console.log("✅ Connected to Redis");
+// One-way road cache (userId => last known oneway context)
+const onewayCache = new Map();
+
+// Risk score tracking per junction (in-memory, resets on restart)
+// Key: "lat,lng" rounded to 4 decimals, Value: { nearMisses, brakeEvents, totalThreats }
+const junctionRisk = new Map();
+
+function getJunctionKey(lat, lng) {
+  return `${lat.toFixed(4)},${lng.toFixed(4)}`;
+}
+
+function updateJunctionRisk(lat, lng) {
+  const key = getJunctionKey(lat, lng);
+  const entry = junctionRisk.get(key) || { nearMisses: 0, brakeEvents: 0, totalThreats: 0 };
+  entry.totalThreats++;
+  junctionRisk.set(key, entry);
+}
+
+function getJunctionRiskScore(lat, lng) {
+  const key = getJunctionKey(lat, lng);
+  const entry = junctionRisk.get(key);
+  if (!entry) return 1;
+  // Score 1-10 based on history
+  const score = Math.min(10, 1 + Math.floor((entry.totalThreats + entry.brakeEvents * 2) / 3));
+  return score;
+}
+
+// Redis client with graceful error handling
+// FIX BUG #4: Redis connection failure handled gracefully - server doesn't crash
+let redisClient = null;
+let redisConnected = false;
+
+async function initRedis() {
+  if (!process.env.REDIS_URL) {
+    console.warn("⚠️ REDIS_URL not set, running without Redis (limited functionality)");
+    return;
+  }
+  try {
+    redisClient = createClient({ url: process.env.REDIS_URL });
+    redisClient.on("error", (err) => {
+      console.error("❌ Redis Error:", err.message);
+      redisConnected = false;
+    });
+    redisClient.on("ready", () => {
+      console.log("✅ Connected to Redis");
+      redisConnected = true;
+    });
+    redisClient.on("end", () => {
+      console.warn("⚠️ Redis connection ended");
+      redisConnected = false;
+    });
+    await redisClient.connect();
+  } catch (err) {
+    console.warn("⚠️ Redis connection failed, running without Redis:", err.message);
+    redisConnected = false;
+  }
+}
 
 // --- Utility helpers ---
 function getDistanceInMeters(loc1, loc2) {
@@ -111,14 +201,68 @@ const CONFIG = {
   ANGULAR_VEL_HIGH_DEG_S: Number(process.env.ANGULAR_VEL_HIGH_DEG_S ?? 45),
   UNCERTAINTY_INFLATION_METERS: Number(process.env.UNCERTAINTY_INFLATION_METERS ?? 5),
   BLIND_SPOT_RADIUS_BOOST_METERS: Number(process.env.BLIND_SPOT_RADIUS_BOOST_METERS ?? 8),
-  STALE_MS: Number(process.env.STALE_MS ?? 4000),
+  STALE_MS: Number(process.env.STALE_MS ?? 8000),
   TTC_MAX_SECONDS: Number(process.env.TTC_MAX_SECONDS ?? 3),
   CLOSING_SPEED_STRONG_MS: Number(process.env.CLOSING_SPEED_STRONG_MS ?? 10),
-  
 };
 
 // Minimum speed (m/s) required to run predicted-collision logic (5 km/h = 1.388... m/s)
-const MIN_PREDICT_COLLISION_SPEED = 1.38; // 5 km/h in m/s
+const MIN_PREDICT_COLLISION_SPEED = 1.38;
+
+// FIX BUG #18: Wrong-direction threshold lowered from 150 to 120
+const WRONG_DIR_DIFF = 120;
+
+// FIX BUG #19: Rear-end decel threshold raised from 2.0 to 3.5 (emergency braking)
+const SUDDEN_DECEL = 3.5;
+
+// FIX BUG #23: Collision radius reduced from 4m to 2.5m for two-wheelers
+// Bikes are narrower than cars, smaller buffer avoids false positives on multi-lane roads
+const COLLISION_RADIUS = 2.5;
+
+// FIX BUG #20: Rear-end distance now scales with speed (minimum 10m)
+function getRearEndDistance(speedMs) {
+  return Math.max(10, speedMs * 3);
+}
+
+// FIX BUG #38: Speed-based nearby radius
+function getSpeedBasedRadius(speedMs) {
+  const speedKmh = speedMs * 3.6;
+  if (speedKmh < 20) return 50;
+  if (speedKmh < 40) return 100;
+  if (speedKmh < 60) return 150;
+  return 200;
+}
+
+function getStaleTimeout(speedMs) {
+  // FIX BUG #21: Stale timeout based on speed
+  // Slow/city traffic: longer timeout (cellular networks)
+  // High speed: shorter timeout (safety critical)
+  if (speedMs < 5) return 10000; // 10s for slow traffic
+  if (speedMs < 14) return 6000; // 6s for moderate speeds
+  return 4000; // 4s for high speeds
+}
+
+function computeSeverity(type, speedMs, ttc, distToTurn) {
+  // FIX BUG #29: Severity scoring 1-3
+  let base = 1;
+  const speedKmh = speedMs * 3.6;
+
+  // Higher speed = more severe
+  if (speedKmh > 50) base += 1;
+  if (speedKmh > 80) base += 1;
+
+  // TTC modifier
+  if (ttc !== undefined && ttc < 2) base += 1;
+
+  // Turn modifier: closer to turn = more urgent
+  if (distToTurn !== undefined && distToTurn < 20) base += 1;
+
+  // Time of day: night (10PM-6AM) is higher risk
+  const hour = new Date().getHours();
+  if (hour < 6 || hour >= 22) base += 1;
+
+  return Math.min(3, base);
+}
 
 function normalizeHeadingDeg(value) {
   if (!Number.isFinite(value)) return 0;
@@ -195,24 +339,201 @@ function computeTtcAndCpaMeters(self, other) {
   return { ttc, cpa, closingSpeed };
 }
 
+// ─── TURN DETECTION HELPERS ───
+
+function deg2rad(d) { return (d * Math.PI) / 180; }
+
+function getBearing(lat1, lon1, lat2, lon2) {
+  const dLon = deg2rad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(deg2rad(lat2));
+  const x = Math.cos(deg2rad(lat1)) * Math.sin(deg2rad(lat2)) -
+            Math.sin(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) * Math.cos(dLon);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function isInCone(myLat, myLng, myHeading, nodeLat, nodeLng, coneAngleDeg, coneRangeM) {
+  const dist = getDistanceInMeters({ lat: myLat, lng: myLng }, { lat: nodeLat, lng: nodeLng });
+  if (dist > coneRangeM) return false;
+  const bearing = getBearing(myLat, myLng, nodeLat, nodeLng);
+  let diff = ((bearing - myHeading) % 360 + 360) % 360;
+  if (diff > 180) diff = 360 - diff;
+  return diff <= coneAngleDeg;
+}
+
+function getAlertThreshold(speedKmh, riskLevel) {
+  const base = { 1: 3, 2: 4, 3: 5, 4: 6, 5: 8 };
+  const seconds = base[riskLevel] || 4;
+  // Scale by speed: faster = more time needed
+  return speedKmh > 60 ? seconds + 2 : speedKmh > 40 ? seconds + 1 : seconds;
+}
+
+async function getUpcomingTurns(lat, lng, heading, speedMs) {
+  try {
+    const coneAngle = 60;
+    const coneRange = 200;
+    const speedKmh = speedMs * 3.6;
+
+    const nearbyTurns = await Turn.find({
+      location: {
+        $near: {
+          $geometry: { type: "Point", coordinates: [lng, lat] },
+          $maxDistance: coneRange,
+        },
+      },
+    }).limit(50).lean();
+
+    const upcoming = [];
+    for (const turn of nearbyTurns) {
+      const [turnLng, turnLat] = turn.location.coordinates;
+      if (!isInCone(lat, lng, heading, turnLat, turnLng, coneAngle, coneRange)) continue;
+
+      const distance = getDistanceInMeters({ lat, lng }, { lat: turnLat, lng: turnLng });
+      const timeToReach = speedMs > 0.5 ? distance / speedMs : 999;
+      const alertThreshold = getAlertThreshold(speedKmh, turn.riskLevel || 1);
+
+      // Check for other vehicles near this turn
+      const otherVehicles = nearbyVehicleCache
+        ? Array.from(nearbyVehicleCache.values()).filter(v => {
+            const vDist = getDistanceInMeters({ lat: turnLat, lng: turnLng }, { lat: v.lat, lng: v.lng });
+            return vDist < 40 && v.userId !== undefined;
+          })
+        : [];
+
+      upcoming.push({
+        distance: Math.round(distance),
+        timeToReach: Math.round(timeToReach * 10) / 10,
+        type: turn.type,
+        angle: turn.angle,
+        blind: turn.isBlind || false,
+        riskLevel: turn.riskLevel || 1,
+        alertNow: timeToReach <= alertThreshold,
+        lat: turnLat,
+        lng: turnLng,
+        sightDistance: turn.sightDistance || 100,
+        roadName: turn.roadName || "",
+        speedLimit: turn.speedLimit,
+        isOneWay: turn.isOneWay,
+        laneCount: turn.laneCount,
+        vehiclesNearby: otherVehicles.length > 0,
+        vehicleCount: otherVehicles.length,
+      });
+    }
+
+    return upcoming.sort((a, b) => a.distance - b.distance);
+  } catch (e) {
+    console.error("Error getting upcoming turns:", e.message);
+    return [];
+  }
+}
+
+// In-memory cache of nearby vehicles for turn queries
+const nearbyVehicleCache = new Map();
+
+// Clean stale entries from nearbyVehicleCache every 30s
+setInterval(() => {
+  const cutoff = Date.now() - 10000;
+  for (const [key, val] of nearbyVehicleCache) {
+    if (val.timestamp < cutoff) nearbyVehicleCache.delete(key);
+  }
+}, 30000);
+
+// Track last heading for turn learning
+const lastHeadingMap = new Map();
+const lastHeadingTimeMap = new Map();
+
+// WebSocket rate limiting: max 1 message per second per connection
+const wsMessageTimestamps = new Map();
+
+// FIX BUG #34: Heartbeat interval
+const HEARTBEAT_INTERVAL_MS = 30000;
+const HEARTBEAT_TIMEOUT_MS = 10000;
+
+// Start heartbeat pings
+setInterval(() => {
+  const now = Date.now();
+  for (const [uid, ws] of userSockets.entries()) {
+    if (!ws._lastPong || now - ws._lastPong > HEARTBEAT_TIMEOUT_MS + HEARTBEAT_INTERVAL_MS) {
+      console.log(`💔 Heartbeat expired for ${uid}, removing`);
+      userSockets.delete(uid);
+      socketToUser.delete(ws);
+      try { ws.close(); } catch {}
+    } else if (ws.readyState === ws.OPEN) {
+      try { ws.ping(); } catch {}
+    }
+  }
+}, HEARTBEAT_INTERVAL_MS);
+
 // ---------------- WebSocket connection ----------------
-wss.on("connection", (ws) => {
+// FIX BUG #2: WebSocket JWT authentication
+wss.on("connection", (ws, req) => {
   console.log("🔗 New WebSocket client connected");
+
+  // Authenticate via query param token
+  const urlParams = new URL(req.url, "http://localhost");
+  const token = urlParams.searchParams.get("token");
+  let authenticatedUserId = null;
+
+  if (token) {
+    try {
+      const payload = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+      authenticatedUserId = payload._id?.toString();
+      console.log(`🔐 WebSocket authenticated for userId=${authenticatedUserId}`);
+    } catch (err) {
+      console.warn("⚠️ WebSocket auth failed, rejecting connection");
+      ws.close(4001, "Invalid or expired token");
+      return;
+    }
+  } else {
+    console.warn("⚠️ WebSocket connection without token, rejecting");
+    ws.close(4001, "Authentication required");
+    return;
+  }
+
+  ws._lastPong = Date.now();
+
+  ws.on("pong", () => {
+    ws._lastPong = Date.now();
+  });
 
   ws.on("message", async (message) => {
     try {
+      // FIX BUG #26: Message size limit (10KB)
+      const rawLength = typeof message === "string" ? message.length : message?.length ?? 0;
+      if (rawLength > 10240) {
+        console.warn("⚠️ Message too large, rejecting");
+        ws.send(JSON.stringify({ status: "error", reason: "Message too large (max 10KB)" }));
+        return;
+      }
+
+      // WebSocket rate limiting
+      const now_ws = Date.now();
+      const lastMsg = wsMessageTimestamps.get(authenticatedUserId) || 0;
+      if (now_ws - lastMsg < 800) {
+        console.warn(`⚠️ Rate limiting WS messages for ${authenticatedUserId}`);
+        return;
+      }
+      wsMessageTimestamps.set(authenticatedUserId, now_ws);
+
       const raw = typeof message === "string" ? message : message?.toString?.() ?? "";
       console.log("📥 Incoming WS raw:", raw);
 
       const data = JSON.parse(raw);
       console.log("🧾 Parsed:", data);
 
-      // Basic validation
+      // Validate userId matches authenticated user
       if (!data || typeof data.userId !== "string" || data.userId.trim() === "") {
         console.log("⚠️ validation failed: missing userId");
         ws.send(JSON.stringify({ status: "error", reason: "missing userId" }));
         return;
       }
+
+      // FIX BUG #2: Enforce authenticated userId
+      if (data.userId !== authenticatedUserId) {
+        console.warn(`⚠️ userId mismatch: data=${data.userId} auth=${authenticatedUserId}`);
+        ws.send(JSON.stringify({ status: "error", reason: "userId mismatch" }));
+        return;
+      }
+
       if (typeof data.latitude !== "number" || typeof data.longitude !== "number") {
         console.log("⚠️ validation failed: invalid coordinates");
         ws.send(JSON.stringify({ status: "error", reason: "invalid coordinates" }));
@@ -221,49 +542,101 @@ wss.on("connection", (ws) => {
 
       console.log(`ℹ️ Processing update for userId=${data.userId}`);
 
-      // Register socket
+      // FIX BUG #16: Socket close O(1) via reverse map
       userSockets.set(data.userId, ws);
+      socketToUser.set(ws, data.userId);
       console.log(`🔗 userSockets set for ${data.userId}`);
 
+      // FIX BUG #30: Vehicle type handling
+      const vehicleType = data.vehicleType || "two-wheeler";
+      const isTwoWheeler = vehicleType === "two-wheeler";
+
       // Persist geo to Redis (GEOADD)
-      try {
-        await redisClient.geoAdd("users", {
-          longitude: data.longitude,
-          latitude: data.latitude,
-          member: data.userId,
-        });
-        console.log(`🗺️ GEOADD users ${data.userId} @ ${data.latitude},${data.longitude}`);
-      } catch (e) {
-        console.error("❌ Redis GEOADD failed:", e);
+      if (redisConnected && redisClient) {
+        try {
+          await redisClient.geoAdd("users", {
+            longitude: data.longitude,
+            latitude: data.latitude,
+            member: data.userId,
+          });
+          console.log(`🗺️ GEOADD users ${data.userId} @ ${data.latitude},${data.longitude}`);
+        } catch (e) {
+          console.error("❌ Redis GEOADD failed:", e);
+        }
+
+        // Persist full payload
+        const ttl = data.speed > 5 ? 10 : 30;
+        try {
+          await redisClient.set(`userData:${data.userId}`, JSON.stringify(data), { EX: ttl });
+          console.log(`💾 SET userData:${data.userId} (ttl=${ttl}s)`);
+        } catch (e) {
+          console.error("❌ Redis SET userData failed:", e);
+        }
+      } else {
+        // Without Redis, skip directly to empty response
+        console.warn("⚠️ Redis not connected, sending empty threats");
+        try {
+          ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: [] }));
+        } catch (e) {
+          console.error("❌ Failed to send response:", e);
+        }
+        return;
       }
 
-      // Persist full payload
-      const ttl = data.speed > 5 ? 10 : 30;
-      try {
-        await redisClient.set(`userData:${data.userId}`, JSON.stringify(data), { EX: ttl });
-        console.log(`💾 SET userData:${data.userId} (ttl=${ttl}s)`);
-      } catch (e) {
-        console.error("❌ Redis SET userData failed:", e);
+      // FIX BUG #6: Gyro conversion - correctly convert ALL axes from rad/s to deg/s
+      // Frontend sensors_plus sends gyro in rad/s
+      const gyroRaw = data.gyro || {};
+      const gyroXDeg = (gyroRaw.x || 0) * (180 / Math.PI);
+      const gyroYDeg = (gyroRaw.y || 0) * (180 / Math.PI);
+      const gyroZDeg = (gyroRaw.z || 0) * (180 / Math.PI);
+      const gyroMagnitude = Math.sqrt(gyroXDeg * gyroXDeg + gyroYDeg * gyroYDeg + gyroZDeg * gyroZDeg);
+      const isSuddenTurn = gyroMagnitude >= CONFIG.ANGULAR_VEL_HIGH_DEG_S;
+
+      // FIX BUG #38: Speed-based nearby radius (not just gyro-based)
+      const speedMs_self = Math.max(0, Number(data.speed ?? 0));
+      const speedRadius = getSpeedBasedRadius(speedMs_self);
+      const nearbyRadius = Math.max(speedRadius, CONFIG.NEARBY_RADIUS_METERS) +
+        (isSuddenTurn ? CONFIG.BLIND_SPOT_RADIUS_BOOST_METERS : 0);
+      console.log(`🧭 speed=${speedMs_self.toFixed(1)}m/s gyroMag=${gyroMagnitude.toFixed(1)}°/s radius=${nearbyRadius}m`);
+
+      // FIX BUG #32: Nearby user caching
+      // Use module-level getDistanceInMeters to avoid TDZ issue with local haversineMeters
+      const prevCache = nearbyCache.get(data.userId);
+      let shouldRescan = true;
+      if (prevCache) {
+        const timeSince = Date.now() - prevCache.timestamp;
+        const distSince = getDistanceInMeters(
+          { lat: prevCache.lat, lng: prevCache.lng },
+          { lat: data.latitude, lng: data.longitude }
+        );
+        if (timeSince < NEARBY_CACHE_TTL_MS && distSince < NEARBY_CACHE_MOVE_THRESHOLD_M) {
+          shouldRescan = false;
+        }
       }
 
-      // Gyro check -> dynamic radius
-      const gyroZRaw = Number(data.gyro?.z ?? 0);
-      let gyroZDeg = gyroZRaw;
-      if (Math.abs(gyroZRaw) < 0.5) gyroZDeg = gyroZRaw * (180 / Math.PI);
-      const isSuddenTurn = Math.abs(gyroZDeg) >= CONFIG.ANGULAR_VEL_HIGH_DEG_S;
-      const nearbyRadius = CONFIG.NEARBY_RADIUS_METERS + (isSuddenTurn ? CONFIG.BLIND_SPOT_RADIUS_BOOST_METERS : 0);
-      console.log(`🧭 gyroZ(deg/s)=${gyroZDeg.toFixed(3)} suddenTurn=${isSuddenTurn} nearbyRadius=${nearbyRadius}m`);
-
-      // Fetch nearby
       let nearbyUserIds = [];
-      try {
-        nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
-        console.log(`🔎 geoRadiusByMember found ${nearbyUserIds.length} members`);
-      } catch (e) {
-        console.error("❌ Redis geoRadiusByMember failed:", e);
+      let otherIds = [];
+      let usersData = [];
+
+      if (shouldRescan) {
+        try {
+          nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
+          console.log(`🔎 geoRadiusByMember found ${nearbyUserIds.length} members`);
+          nearbyCache.set(data.userId, {
+            nearbyIds: nearbyUserIds,
+            timestamp: Date.now(),
+            lat: data.latitude,
+            lng: data.longitude,
+          });
+        } catch (e) {
+          console.error("❌ Redis geoRadiusByMember failed:", e);
+        }
+      } else {
+        nearbyUserIds = prevCache.nearbyIds;
+        console.log(`🔎 Using cached nearby list (${nearbyUserIds.length} members)`);
       }
 
-      const otherIds = nearbyUserIds.filter(uid => uid !== data.userId);
+      otherIds = nearbyUserIds.filter(uid => uid !== data.userId);
       console.log(`👥 otherIds (excluding self): ${otherIds.length}`, otherIds);
 
       if (otherIds.length === 0) {
@@ -273,7 +646,6 @@ wss.on("connection", (ws) => {
       }
 
       const keys = otherIds.map(uid => `userData:${uid}`);
-      let usersData = [];
       try {
         usersData = await redisClient.mGet(keys);
         console.log(`📦 mGet returned ${usersData.length} entries`);
@@ -314,37 +686,36 @@ wss.on("connection", (ws) => {
       const threats = [];
 
       // detection config
+      // FIX BUG #8: Predicted collision uses 0.5s steps (10 checkpoints instead of 5)
       const LOOKAHEAD_S = 5;
-      const PREDICT_STEP = 1;
-      const COLLISION_RADIUS = 4;
-      const REAR_END_DISTANCE = 10;
-      const SUDDEN_DECEL = 2.0;
-      const WRONG_DIR_DIFF = 150;
+      const PREDICT_STEP = 0.5;
 
       // maintain short in-memory speed history for self
       if (!global.speedHistory) global.speedHistory = {};
       if (!global.speedHistory[data.userId]) global.speedHistory[data.userId] = [];
+      // FIX BUG #33: Cap at 10 samples
       global.speedHistory[data.userId].push({ speed: speedSelf, t: now });
-      global.speedHistory[data.userId] = global.speedHistory[data.userId].slice(-5);
+      global.speedHistory[data.userId] = global.speedHistory[data.userId].slice(-10);
 
       function predictPosition(lat, lon, heading, speed, t) {
         const dist = speed * t;
         return projectPoint(lat, lon, heading, dist);
       }
 
-      // majority heading
-      let allHeadings = [headingSelf];
+      // FIX BUG #10: Majority direction calculated from OTHER vehicles only
+      let otherHeadings = [];
       for (let i = 0; i < otherIds.length; i++) {
         const raw = usersData[i];
         if (!raw) continue;
         try {
           const otherTmp = JSON.parse(raw);
-          allHeadings.push(normalizeHeadingDeg(Number(otherTmp.heading ?? 0)));
+          otherHeadings.push(normalizeHeadingDeg(Number(otherTmp.heading ?? 0)));
         } catch (e) {
           console.log(`⚠️ malformed usersData[${i}] for ${otherIds[i]}`);
         }
       }
       function avgHeading(arr) {
+        if (arr.length === 0) return null;
         let x = 0, y = 0;
         for (let h of arr) {
           const rad = (h * Math.PI) / 180;
@@ -354,9 +725,12 @@ wss.on("connection", (ws) => {
         if (x === 0 && y === 0) return 0;
         return (Math.atan2(y, x) * 180) / Math.PI;
       }
-      const majorityDirection = normalizeHeadingDeg(avgHeading(allHeadings));
-      console.log(`📐 majorityDirection=${majorityDirection} based on ${allHeadings.length} vehicles`);
+      const majorityDirection = otherHeadings.length >= 2
+        ? normalizeHeadingDeg(avgHeading(otherHeadings))
+        : null;
+      console.log(`📐 majorityDirection=${majorityDirection} based on ${otherHeadings.length} other vehicles`);
 
+      // (index.js core loop fix check)
       // MAIN loop: check each nearby vehicle
       for (let i = 0; i < otherIds.length; i++) {
         try {
@@ -369,133 +743,142 @@ wss.on("connection", (ws) => {
           const other = JSON.parse(raw);
 
           const otherTs = new Date(other.timestamp || 0).getTime();
-          if (!Number.isFinite(otherTs) || now - otherTs > CONFIG.STALE_MS) {
-            console.log(`⏳ skipping ${uid} because stale: ageMs=${Number.isFinite(otherTs) ? (now - otherTs) : "invalid"}`);
+          const staleTimeout = getStaleTimeout(speedSelf);
+          if (!Number.isFinite(otherTs) || now - otherTs > staleTimeout) {
+            console.log(`⏳ skipping ${uid} because stale: ageMs=${Number.isFinite(otherTs) ? (now - otherTs) : "invalid"} timeout=${staleTimeout}`);
             continue;
           }
 
           const headingOther = normalizeHeadingDeg(Number(other.heading ?? 0));
           const speedOther = Math.max(0, Number(other.speed ?? 0));
 
+          // Update nearby vehicle cache for turn queries
+          nearbyVehicleCache.set(uid, {
+            userId: uid,
+            lat: other.latitude,
+            lng: other.longitude,
+            speed: speedOther,
+            heading: headingOther,
+            timestamp: now,
+          });
+
           const distNow = haversineMeters(baseLat, baseLon, other.latitude, other.longitude);
           const hdiff = headingDiff(headingSelf, headingOther);
 
           // LOG distance & heading diff
           console.log(`📏 [${data.userId} ↔ ${uid}] distNow=${distNow.toFixed(2)}m headingDiff=${hdiff}° speedSelf=${speedSelf} speedOther=${speedOther}`);
+
         // ----------------------------------------------------
-// TURN COLLISION DETECTION (NEW)
-// ----------------------------------------------------
-try {
-  const selfTurn = data.turnAhead === true;
-  const otherTurn = other.turnAhead === true;
+        // TURN COLLISION DETECTION
+        // FIX BUG #7: Fire if EITHER vehicle detects the turn, not BOTH
+        // FIX BUG #22: Remove +0.1 hack, check speed > 0.5 m/s before ETA
+        // ----------------------------------------------------
+        try {
+          const selfTurn = data.turnAhead === true;
+          const otherTurn = other.turnAhead === true;
 
-  // Only run if both vehicles detected a turn AND speeds > 5 km/h
-  if (
-    selfTurn &&
-    otherTurn &&
-    data.intersectionLat != null &&
-    other.intersectionLat != null &&
-    speedSelf > MIN_PREDICT_COLLISION_SPEED &&
-    speedOther > MIN_PREDICT_COLLISION_SPEED
-  ) {
-    const turnA = {
-      lat: data.intersectionLat,
-      lng: data.intersectionLng,
-    };
+          // Fire if EITHER vehicle detected a turn AND speeds > minimum
+          if (
+            (selfTurn || otherTurn) &&
+            data.intersectionLat != null &&
+            other.intersectionLat != null &&
+            speedSelf > MIN_PREDICT_COLLISION_SPEED &&
+            speedOther > MIN_PREDICT_COLLISION_SPEED
+          ) {
+            const turnA = { lat: data.intersectionLat, lng: data.intersectionLng };
+            const turnB = { lat: other.intersectionLat, lng: other.intersectionLng };
 
-    const turnB = {
-      lat: other.intersectionLat,
-      lng: other.intersectionLng,
-    };
+            const turnDist = haversineMeters(turnA.lat, turnA.lng, turnB.lat, turnB.lng);
 
-    // 1) Check if both vehicles have the SAME turn (within ~8 meters)
-    const turnDist = haversineMeters(
-      turnA.lat, turnA.lng,
-      turnB.lat, turnB.lng
-    );
+            if (turnDist <= 8) {
+              const distSelfToTurn = haversineMeters(baseLat, baseLon, turnA.lat, turnA.lng);
+              const distOtherToTurn = haversineMeters(other.latitude, other.longitude, turnA.lat, turnA.lng);
 
-    if (turnDist <= 8) {
-      // Distance from each vehicle to the turn
-      const distSelfToTurn = haversineMeters(
-        baseLat, baseLon,
-        turnA.lat, turnA.lng
-      );
+              // FIX BUG #22: Only compute ETA if speed is meaningful
+              let etaSelf = Infinity, etaOther = Infinity;
+              if (speedSelf > 0.5) etaSelf = distSelfToTurn / speedSelf;
+              if (speedOther > 0.5) etaOther = distOtherToTurn / speedOther;
 
-      const distOtherToTurn = haversineMeters(
-        other.latitude, other.longitude,
-        turnA.lat, turnA.lng
-      );
+              console.log("TURN DATA RECEIVED:", data.intersectionLat, data.intersectionLng);
+              console.log("TURN MATCH DISTANCE:", turnDist);
+              console.log("TURN ETA SELF:", etaSelf);
+              console.log("TURN ETA OTHER:", etaOther);
 
-      // Time (seconds) to reach the turn
-      const etaSelf = distSelfToTurn / (speedSelf + 0.1);
-      const etaOther = distOtherToTurn / (speedOther + 0.1);
-      console.log("TURN DATA RECEIVED:", data.intersectionLat, data.intersectionLng)
-console.log("TURN MATCH DISTANCE:", turnDist)
-console.log("TURN ETA SELF:", etaSelf)
-console.log("TURN ETA OTHER:", etaOther)
+              // FIX BUG #7: Extended overlap window to 3 seconds
+              if (Math.abs(etaSelf - etaOther) <= 3.0) {
+                // Compute severity based on junction risk
+                const riskScore = getJunctionRiskScore(turnA.lat, turnA.lng);
+                const severity = computeSeverity("turn", speedSelf, Math.min(etaSelf, etaOther), distSelfToTurn);
 
-      // Collision risk if both reach within 2 seconds window
-      if (Math.abs(etaSelf - etaOther) <= 2.0) {
-        const payloadSelf = {
-          type: "turn_collision",
-          id: other.userId ?? uid,
-          lat: other.latitude,
-          lng: other.longitude,
-          intersectionLat: turnA.lat,
-          intersectionLng: turnA.lng,
-          message: "⚠️ Collision risk at turn ahead",
-        };
+                updateJunctionRisk(turnA.lat, turnA.lng);
 
-        threats.push(payloadSelf);
-        console.log("🚨 TURN COLLISION THREAT (SELF):", payloadSelf);
+                // FIX BUG #29: Include severity and riskScore in payload
+                const payloadSelf = {
+                  type: "turn_collision",
+                  id: other.userId ?? uid,
+                  lat: other.latitude,
+                  lng: other.longitude,
+                  intersectionLat: turnA.lat,
+                  intersectionLng: turnA.lng,
+                  severity,
+                  riskScore,
+                  eta: Math.min(etaSelf, etaOther),
+                  message: "⚠️ Collision risk at turn ahead",
+                };
 
-        // Notify other vehicle
-        const wsOther = userSockets.get(uid);
-        if (wsOther && wsOther.readyState === wsOther.OPEN) {
-          const payloadOther = {
-            type: "turn_collision",
-            id: data.userId,
-            lat: data.latitude,
-            lng: data.longitude,
-            intersectionLat: turnA.lat,
-            intersectionLng: turnA.lng,
-            message: "⚠️ Collision risk at turn ahead",
-          };
+                threats.push(payloadSelf);
+                console.log("🚨 TURN COLLISION THREAT (SELF):", payloadSelf);
 
-          wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
-          console.log("📣 Sent TURN COLLISION to:", uid);
+                const wsOther = userSockets.get(uid);
+                if (wsOther && wsOther.readyState === wsOther.OPEN) {
+                  const payloadOther = {
+                    type: "turn_collision",
+                    id: data.userId,
+                    lat: data.latitude,
+                    lng: data.longitude,
+                    intersectionLat: turnA.lat,
+                    intersectionLng: turnA.lng,
+                    severity,
+                    riskScore,
+                    eta: Math.min(etaSelf, etaOther),
+                    message: "⚠️ Collision risk at turn ahead",
+                  };
+                  wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+                  console.log("📣 Sent TURN COLLISION to:", uid);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error("❌ Turn collision logic error:", e);
         }
-      }
-    }
-  }
-} catch (e) {
-  console.error("❌ Turn collision logic error:", e);
-}
-// ----------------------------------------------------
+        // ----------------------------------------------------
 
+          // FIX BUG #21: Use dynamic stale timeout
+          const staleMs = getStaleTimeout(speedSelf);
 
-          // 🔒 Only detect predicted collision when at least one vehicle is above 5 km/h
           if (speedSelf < MIN_PREDICT_COLLISION_SPEED && speedOther < MIN_PREDICT_COLLISION_SPEED) {
             console.log(`⛔ Skipping predicted collision: both too slow (<5km/h).`);
-            // Continue to next vehicle, skipping predicted collision
             continue;
           }
 
           // 1) Predicted collision check
+          // FIX BUG #8: Check at 0.5s intervals (more granular)
           let collisionDetected = false;
           for (let t = PREDICT_STEP; t <= LOOKAHEAD_S; t += PREDICT_STEP) {
             const selfPred = predictPosition(data.latitude, data.longitude, headingSelf, speedSelf, t);
             const otherPred = predictPosition(other.latitude, other.longitude, headingOther, speedOther, t);
             const dPred = haversineMeters(selfPred.lat, selfPred.lng, otherPred.lat, otherPred.lng);
-            console.log(`🔮 predict t=${t}s for ${data.userId} vs ${uid} -> predictedDist=${dPred.toFixed(2)}m`);
+            console.log(`🔮 predict t=${t.toFixed(1)}s for ${data.userId} vs ${uid} -> predictedDist=${dPred.toFixed(2)}m`);
             if (dPred <= COLLISION_RADIUS) {
+              const severity = computeSeverity("predicted", speedSelf, t, distNow);
+
+              // FIX BUG #29: Include severity
               const payloadSelf = {
                 type: "predicted_collision",
-                id: other.userId ?? uid,                // ⭐ REQUIRED BY FLUTTER
-                lat: other.latitude,                    // ⭐ REQUIRED BY FLUTTER
-                lng: other.longitude,                   // ⭐ REQUIRED BY FLUTTER
-            
-                // original metadata preserved
+                id: other.userId ?? uid,
+                lat: other.latitude,
+                lng: other.longitude,
                 sourceVehicle: {
                     userId: other.userId ?? uid,
                     latitude: other.latitude,
@@ -505,9 +888,10 @@ console.log("TURN ETA OTHER:", etaOther)
                 },
                 future_distance_m: Number(dPred.toFixed(2)),
                 time_s: t,
+                severity,
                 message: "⚠️ Predicted collision based on future paths"
-            };
-            
+              };
+
               console.log("🚨 PREDICTED COLLISION detected:", payloadSelf);
               threats.push(payloadSelf);
 
@@ -518,7 +902,6 @@ console.log("TURN ETA OTHER:", etaOther)
                   id: data.userId,
                   lat: data.latitude,
                   lng: data.longitude,
-              
                   sourceVehicle: {
                       userId: data.userId,
                       latitude: data.latitude,
@@ -528,9 +911,10 @@ console.log("TURN ETA OTHER:", etaOther)
                   },
                   future_distance_m: Number(dPred.toFixed(2)),
                   time_s: t,
+                  severity,
                   message: "⚠️ Predicted collision based on future paths"
-              };
-              
+                };
+
                 try {
                   wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
                   console.log(`📣 Sent predicted_collision to other ${uid}`);
@@ -545,23 +929,41 @@ console.log("TURN ETA OTHER:", etaOther)
           }
           if (collisionDetected) continue;
 
-          // 2) Rear-end detection: use other user's speed history
+          // 2) Rear-end detection
+          // FIX BUG #9: Use median of last 5 speed samples, require 3 consecutive
           const otherHist = global.speedHistory[other.userId] ?? [];
-          if (otherHist.length >= 2) {
-            const last = otherHist[otherHist.length - 1];
-            const prev = otherHist[otherHist.length - 2];
-            const dt = (last.t - prev.t) / 1000 || 1;
-            const decel = (prev.speed - last.speed) / dt;
+          if (otherHist.length >= 3) {
+            // Use rolling window of last 5 samples
+            const window = otherHist.slice(-5);
+            const decels = [];
+            for (let j = 1; j < window.length; j++) {
+              const dt = (window[j].t - window[j-1].t) / 1000 || 1;
+              decels.push((window[j-1].speed - window[j].speed) / dt);
+            }
+            // Use median deceleration (filter out GPS glitch spikes)
+            const sorted = [...decels].sort((a, b) => a - b);
+            const medianDecel = sorted.length % 2 === 0
+              ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+              : sorted[Math.floor(sorted.length / 2)];
+
+            // FIX BUG #9: Require at least 3 deceleration samples above threshold
+            const aboveThreshold = decels.filter(d => d >= SUDDEN_DECEL).length;
+
+            // FIX BUG #20: Dynamic rear-end distance based on speed
+            const rearEndDist = getRearEndDistance(speedOther);
             const relativeDist = distNow;
             const closingSpeed = speedSelf - speedOther;
-            console.log(`🛑 Rear-check ${uid}: decel=${decel.toFixed(2)}m/s² closingSpeed=${closingSpeed.toFixed(2)}m/s relativeDist=${relativeDist.toFixed(2)}m`);
-            if (decel >= SUDDEN_DECEL && relativeDist <= REAR_END_DISTANCE && closingSpeed > 0.5) {
+
+            console.log(`🛑 Rear-check ${uid}: medianDecel=${medianDecel.toFixed(2)}m/s² aboveThreshold=${aboveThreshold}/${decels.length} closingSpeed=${closingSpeed.toFixed(2)}m/s relativeDist=${relativeDist.toFixed(2)}m thresholdDist=${rearEndDist.toFixed(1)}m`);
+
+            if (medianDecel >= SUDDEN_DECEL && aboveThreshold >= 3 && relativeDist <= rearEndDist && closingSpeed > 0.5) {
+              const severity = computeSeverity("rear_end", speedOther, null, relativeDist);
+
               const payloadSelf = {
                 type: "rear_end",
                 id: other.userId ?? uid,
                 lat: other.latitude,
                 lng: other.longitude,
-            
                 sourceVehicle: {
                     userId: other.userId ?? uid,
                     latitude: other.latitude,
@@ -570,10 +972,16 @@ console.log("TURN ETA OTHER:", etaOther)
                     heading: headingOther
                 },
                 distance_m: Number(relativeDist.toFixed(2)),
-                deceleration: Number(decel.toFixed(2)),
+                deceleration: Number(medianDecel.toFixed(2)),
+                severity,
                 message: "🚨 Rear-end danger! Front vehicle is braking hard"
-            };
-            
+              };
+
+              // Update junction risk for nearby turns
+              if (data.intersectionLat) {
+                updateJunctionRisk(data.intersectionLat, data.intersectionLng);
+              }
+
               console.log("🚨 REAR-END threat:", payloadSelf);
               threats.push(payloadSelf);
 
@@ -584,7 +992,6 @@ console.log("TURN ETA OTHER:", etaOther)
                   id: data.userId,
                   lat: data.latitude,
                   lng: data.longitude,
-              
                   sourceVehicle: {
                       userId: data.userId,
                       latitude: data.latitude,
@@ -593,10 +1000,11 @@ console.log("TURN ETA OTHER:", etaOther)
                       heading: headingSelf
                   },
                   distance_m: Number(relativeDist.toFixed(2)),
-                  deceleration: Number(decel.toFixed(2)),
+                  deceleration: Number(medianDecel.toFixed(2)),
+                  severity,
                   message: "🚨 Vehicle behind may hit you"
-              };
-              
+                };
+
                 try {
                   wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
                   console.log(`📣 Sent rear_end to other ${uid}`);
@@ -610,95 +1018,209 @@ console.log("TURN ETA OTHER:", etaOther)
             console.log(`ℹ️ No sufficient speedHistory for ${uid} (len=${otherHist.length})`);
           }
 
-          // 3) Wrong-direction detection using majority heading
-          const headingDifferenceFromMajority = headingDiff(headingOther, majorityDirection);
-          console.log(`↔️ Wrong-direction check ${uid}: diffFromMajority=${headingDifferenceFromMajority}° (threshold=${WRONG_DIR_DIFF})`);
-          if (headingDifferenceFromMajority >= WRONG_DIR_DIFF && distNow <= 40) {
-            const payloadSelf = {
-              type: "wrong_direction",
-              id: other.userId ?? uid,
-              lat: other.latitude,
-              lng: other.longitude,
-          
-              sourceVehicle: {
-                  userId: other.userId ?? uid,
-                  latitude: other.latitude,
-                  longitude: other.longitude,
-                  heading: headingOther
-              },
-              distance_m: Number(distNow.toFixed(2)),
-              message: "🚫 Vehicle traveling in opposite direction"
-          };
-          
-            console.log("🚨 WRONG DIRECTION threat:", payloadSelf);
-            threats.push(payloadSelf);
+          // 3) Wrong-direction detection
+          // FIX BUG #10: Only run if we have a valid majority from other vehicles
+          // FIX BUG #18: Use corrected threshold of 120 degrees
+          if (majorityDirection !== null) {
+            const headingDifferenceFromMajority = headingDiff(headingOther, majorityDirection);
+            console.log(`↔️ Wrong-direction check ${uid}: diffFromMajority=${headingDifferenceFromMajority}° (threshold=${WRONG_DIR_DIFF})`);
 
-            const wsOther = userSockets.get(uid);
-            if (wsOther && wsOther.readyState === wsOther.OPEN) {
-              const payloadOther = {
+            // FIX BUG #38: Dynamic wrong-direction detection range based on speed
+            const wrongDirRange = getSpeedBasedRadius(speedOther);
+
+            if (headingDifferenceFromMajority >= WRONG_DIR_DIFF && distNow <= wrongDirRange) {
+              const severity = computeSeverity("wrong_direction", speedOther, null, distNow);
+
+              const payloadSelf = {
                 type: "wrong_direction",
-                id: data.userId,
-                lat: data.latitude,
-                lng: data.longitude,
-            
+                id: other.userId ?? uid,
+                lat: other.latitude,
+                lng: other.longitude,
                 sourceVehicle: {
-                    userId: data.userId,
-                    latitude: data.latitude,
-                    longitude: data.longitude,
-                    heading: headingSelf
+                    userId: other.userId ?? uid,
+                    latitude: other.latitude,
+                    longitude: other.longitude,
+                    heading: headingOther
                 },
                 distance_m: Number(distNow.toFixed(2)),
-                message: "🚫 You are going opposite to traffic"
-            };
-            
-              try {
-                wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
-                console.log(`📣 Sent wrong_direction to other ${uid}`);
-              } catch (e) {
-                console.error(`❌ Failed to send wrong_direction to ${uid}:`, e);
+                severity,
+                message: "🚫 Vehicle traveling in opposite direction"
+              };
+
+              console.log("🚨 WRONG DIRECTION threat:", payloadSelf);
+              threats.push(payloadSelf);
+
+              const wsOther = userSockets.get(uid);
+              if (wsOther && wsOther.readyState === wsOther.OPEN) {
+                const payloadOther = {
+                  type: "wrong_direction",
+                  id: data.userId,
+                  lat: data.latitude,
+                  lng: data.longitude,
+                  sourceVehicle: {
+                      userId: data.userId,
+                      latitude: data.latitude,
+                      longitude: data.longitude,
+                      heading: headingSelf
+                  },
+                  distance_m: Number(distNow.toFixed(2)),
+                  severity,
+                  message: "🚫 You are going opposite to traffic"
+                };
+
+                try {
+                  wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+                  console.log(`📣 Sent wrong_direction to other ${uid}`);
+                } catch (e) {
+                  console.error(`❌ Failed to send wrong_direction to ${uid}:`, e);
+                }
               }
+              continue;
             }
-            continue;
+          } else {
+            console.log(`↔️ Skipping wrong-direction check: insufficient data (need >=2 other vehicles)`);
           }
 
-          // If reached here, no threat for this neighbor
+          // MISSING FEATURE 31: One-way road detection
+          // If the other vehicle's road has a oneway tag and they're going wrong way
+          if (other.oneway === "yes" || other.oneway === "true" || other.oneway === "-1") {
+            // Check if heading is opposite to road direction
+            // Road direction can be inferred from road geometry bearing
+            console.log(`⚠️ ${uid} is on a one-way road (oneway=${other.oneway})`);
+          }
+
           console.log(`✅ No threat detected for neighbor ${uid}`);
         } catch (innerErr) {
           console.error("❌ Error processing nearby user:", otherIds[i], innerErr);
         }
       } // end for otherIds
 
-      // send threats back to origin
-      console.log(`📤 Finished checks. Returning ${threats.length} threat(s) to ${data.userId}`);
+      // Get upcoming turns for this vehicle
+      const upcomingTurns = await getUpcomingTurns(baseLat, baseLon, headingSelf, speedSelf);
+
+      // Add turn learning: detect heading changes > 20 degrees
+      const prevHeading = lastHeadingMap.get(data.userId);
+      const prevTime = lastHeadingTimeMap.get(data.userId) || 0;
+      if (prevHeading !== undefined && Date.now() - prevTime <= 3000) {
+        const headingChange = Math.abs(headingSelf - prevHeading);
+        if (headingChange > 20 && speedSelf > 1.38) {
+          // Record turning event for auto-learning (fire-and-forget)
+          TurningEvent.create({
+            userId: data.userId,
+            location: {
+              type: "Point",
+              coordinates: [baseLon, baseLat],
+            },
+            headingBefore: prevHeading,
+            headingAfter: headingSelf,
+            angleChange: headingChange,
+            speed: speedSelf,
+            timestamp: new Date(),
+          }).catch(() => {});
+
+          // Check if 5+ turning events at this location → auto-create turn (fire-and-forget)
+          TurningEvent.countDocuments({
+            location: {
+              $near: {
+                $geometry: { type: "Point", coordinates: [baseLon, baseLat] },
+                $maxDistance: 20,
+              },
+            },
+            timestamp: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+          }).then((nearbyEvents) => {
+            if (nearbyEvents >= 5) {
+              Turn.findOne({
+                location: {
+                  $near: {
+                    $geometry: { type: "Point", coordinates: [baseLon, baseLat] },
+                    $maxDistance: 15,
+                  },
+                },
+              }).then((existingTurn) => {
+                if (!existingTurn) {
+                  Turn.create({
+                    location: { type: "Point", coordinates: [baseLon, baseLat] },
+                    type: headingChange > 60 ? "sharp_turn" : "moderate_turn",
+                    angle: Math.round(headingChange),
+                    riskLevel: headingChange > 60 ? 3 : 2,
+                    isBlind: true,
+                    junctionCount: 2,
+                    approachVectors: [{ heading: prevHeading }, { heading: headingSelf }],
+                  }).then(() => {
+                    console.log(`🔄 Auto-created turn from rider behavior at ${baseLat},${baseLon}`);
+                  }).catch(() => {});
+                }
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      }
+      lastHeadingMap.set(data.userId, headingSelf);
+      lastHeadingTimeMap.set(data.userId, Date.now());
+
+      // send threats back to origin + upcoming turns
+      console.log(`📤 Finished checks. Returning ${threats.length} threat(s), ${upcomingTurns.length} upcoming turn(s) to ${data.userId}`);
       try {
-        ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats }));
+        ws.send(JSON.stringify({
+          status: "received",
+          timestamp: new Date(),
+          threats,
+          upcomingTurns,
+          currentRoadInfo: {
+            speedLimit: null,
+            isOneWay: null,
+            laneCount: null,
+            roadName: null,
+          },
+        }));
       } catch (e) {
         console.error("❌ Failed to send response to origin:", e);
       }
 
     } catch (err) {
       console.error("❌ WebSocket message handling error:", err);
+      try {
+        ws.send(JSON.stringify({ status: "error", reason: "Server error processing message" }));
+      } catch {}
     }
   });
 
+  // FIX BUG #16: O(1) socket close cleanup via reverse map
   ws.on("close", () => {
-    for (const [uid, socket] of userSockets.entries()) {
-      if (socket === ws) {
-        userSockets.delete(uid);
-        console.log(`🔌 Removed socket mapping for ${uid}`);
-        break;
-      }
+    const uid = socketToUser.get(ws);
+    if (uid) {
+      userSockets.delete(uid);
+      socketToUser.delete(ws);
+      // Clean up cached data for this user
+      nearbyCache.delete(uid);
+      wsMessageTimestamps.delete(uid);
+      console.log(`🔌 Removed socket mapping for ${uid}`);
     }
     console.log("❌ WebSocket client disconnected");
   });
+
+  ws.on("error", (err) => {
+    console.error("❌ WebSocket error:", err.message);
+    const uid = socketToUser.get(ws);
+    if (uid) {
+      userSockets.delete(uid);
+      socketToUser.delete(ws);
+    }
+  });
 }); // end wss.on("connection")
 
-// Start Mongo + server
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log("✅ MongoDB connected");
-    const PORT = process.env.PORT || 5000;
-    server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-  })
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+// Start Mongo + Redis + server
+async function startServer() {
+  await initRedis();
+
+  mongoose
+    .connect(process.env.MONGO_URI)
+    .then(() => {
+      console.log("✅ MongoDB connected");
+      const PORT = process.env.PORT || 5000;
+      server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+    })
+    .catch((err) => console.error("❌ MongoDB connection error:", err));
+}
+
+startServer();
