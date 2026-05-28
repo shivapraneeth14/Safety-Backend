@@ -176,6 +176,7 @@ async function importRoads() {
   console.log("Calculating turns at junctions...");
   const turns = [];
   const processedNodes = new Set();
+  const wayIndex = new Map(ways.map(w => [w.osmId, w]));
 
   for (const way of ways) {
     for (let i = 0; i < way.nodes.length; i++) {
@@ -195,7 +196,7 @@ async function importRoads() {
 
       // Get approach vectors for each way at this node
       for (const wayId of sharedWays) {
-        const w = ways.find(ww => ww.osmId === wayId);
+        const w = wayIndex.get(wayId);
         if (!w) continue;
 
         const idx = w.nodes.indexOf(nodeId);
@@ -229,17 +230,17 @@ async function importRoads() {
       turnType = getTurnTypeByRoadCountAndAngle(numRoads, maxAngle);
 
       // Check for roundabout
-      const hasRoundaboutTag = ways.some(w =>
-        sharedWays.includes(w.osmId) &&
-        (w.junction === "roundabout" || w.junction === "circular")
-      );
+      const hasRoundaboutTag = sharedWays.some(wId => {
+        const w = wayIndex.get(wId);
+        return w && (w.junction === "roundabout" || w.junction === "circular");
+      });
       if (hasRoundaboutTag) {
         turnType = sharedWays.length <= 4 ? "mini_roundabout" : "roundabout";
       }
 
       // Check for slip road
-      const hasSlipRoad = ways.some(w =>
-        sharedWays.includes(w.osmId) && w.highway?.includes("_link")
+      const hasSlipRoad = sharedWays.some(wId =>
+        wayIndex.get(wId)?.highway?.includes("_link")
       );
       if (hasSlipRoad && numRoads >= 2) {
         turnType = "slip_road";
@@ -253,7 +254,7 @@ async function importRoads() {
       // Determine max speed limit among approaches
       let maxSpeed = 0;
       for (const wId of sharedWays) {
-        const w = ways.find(ww => ww.osmId === wId);
+        const w = wayIndex.get(wId);
         if (w?.maxspeed) {
           const s = parseInt(w.maxspeed, 10);
           if (!isNaN(s) && s > maxSpeed) maxSpeed = s;
@@ -266,14 +267,14 @@ async function importRoads() {
       const sightDistance = estimateSightDistance(maxAngle);
 
       // Check for oneway
-      const isOneWay = ways.some(w =>
-        sharedWays.includes(w.osmId) && w.oneway === "yes"
+      const isOneWay = sharedWays.some(wId =>
+        wayIndex.get(wId)?.oneway === "yes"
       );
 
       // Lane count
       let laneCount = 0;
       for (const wId of sharedWays) {
-        const w = ways.find(ww => ww.osmId === wId);
+        const w = wayIndex.get(wId);
         if (w?.lanes) {
           const l = parseInt(w.lanes, 10);
           if (!isNaN(l) && l > laneCount) laneCount = l;
@@ -283,7 +284,7 @@ async function importRoads() {
       // Road width
       let roadWidth = 0;
       for (const wId of sharedWays) {
-        const w = ways.find(ww => ww.osmId === wId);
+        const w = wayIndex.get(wId);
         if (w?.width) {
           const ww = parseFloat(w.width);
           if (!isNaN(ww) && ww > roadWidth) roadWidth = ww;
@@ -301,10 +302,10 @@ async function importRoads() {
       riskLevel = Math.min(5, Math.max(1, riskLevel));
 
       // Road name
-      const roadName = ways
-        .filter(w => sharedWays.includes(w.osmId) && w.name)
-        .map(w => w.name)
-        .find(() => true) || "";
+      const roadName = sharedWays
+        .map(wId => wayIndex.get(wId))
+        .find(w => w?.name)
+        ?.name || "";
 
       // Get the turn type string
       let typeStr = turnType;

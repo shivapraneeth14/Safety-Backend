@@ -91,8 +91,8 @@ let ACCESS_TOKEN = null;
 async function getAccessToken() {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify({
-      loginname: 'testuser',
-      password: 'testpass123',
+      loginname: 'simuser',
+      password: 'sim123',
     });
     const options = {
       hostname: 'localhost',

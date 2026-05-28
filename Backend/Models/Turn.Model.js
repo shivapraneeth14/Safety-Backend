@@ -17,6 +17,7 @@ const turnSchema = new mongoose.Schema({
       "s_curve", "reverse_s_curve",
       "blind_crest", "dip", "narrow_section",
       "dead_end", "complex",
+      "straight", "slight_curve", "moderate_turn", "very_sharp_turn", "bend",
     ],
     required: true,
   },
