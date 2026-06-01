@@ -39,17 +39,16 @@ class RoadGraph {
     console.log("🗺️ Loading road graph from MongoDB...");
 
     try {
-      // Hyderabad bounding box (77k roads, ~92MB) — fits Render free tier
       const HYDERABAD_BOX = {
         $geoWithin: {
           $geometry: {
             type: "Polygon",
             coordinates: [[
-              [78.35, 17.30],
-              [78.60, 17.30],
-              [78.60, 17.45],
-              [78.35, 17.45],
-              [78.35, 17.30]
+              [78.44, 17.34],
+              [78.56, 17.34],
+              [78.56, 17.42],
+              [78.44, 17.42],
+              [78.44, 17.34]
             ]]
           }
         }
@@ -62,6 +61,8 @@ class RoadGraph {
         osmAgeDays: 1,
       }).lean();
       console.log(`📦 Loaded ${roads.length} roads`);
+      const m = process.memoryUsage();
+      console.log("📊 Heap:", Math.round(m.heapUsed / 1024 / 1024), "MB");
 
       for (const road of roads) {
         const osmId = road.osmId;
