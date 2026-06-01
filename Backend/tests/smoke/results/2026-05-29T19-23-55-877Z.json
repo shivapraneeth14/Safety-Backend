@@ -1,0 +1,85 @@
+{
+  "timestamp": "2026-05-29T19:23:55.878Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "Smoke-01",
+      "label": "G-03 Parallel",
+      "passed": true,
+      "latencyMs": 1146.7769999999998,
+      "failures": [],
+      "mapMatchConfidence": 0.7581226839079671,
+      "threatsCount": 0,
+      "serverTime": 1780082627651
+    },
+    {
+      "scenario": "Smoke-02",
+      "label": "G-04 Flyover",
+      "passed": true,
+      "latencyMs": 816.139167,
+      "failures": [],
+      "mapMatchConfidence": 0.7590613853221214,
+      "threatsCount": 0,
+      "serverTime": 1780082628468
+    },
+    {
+      "scenario": "Smoke-03",
+      "label": "G-05 GPS Drift",
+      "passed": true,
+      "latencyMs": 1127.5637499999998,
+      "failures": [],
+      "mapMatchConfidence": 0.6295165392065678,
+      "threatsCount": 0,
+      "serverTime": 1780082629596
+    },
+    {
+      "scenario": "Smoke-04",
+      "label": "RT-01 GPS Jump",
+      "passed": true,
+      "latencyMs": 3969.786417,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-05",
+      "label": "Time Sync",
+      "passed": true,
+      "latencyMs": 1190.1444579999998,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-06",
+      "label": "Road Bubble",
+      "passed": true,
+      "latencyMs": 155.5216249999994,
+      "failures": [],
+      "mapMatchConfidence": 0.7993351702884678,
+      "threatsCount": 0,
+      "serverTime": 1780082634913
+    },
+    {
+      "scenario": "Smoke-07",
+      "label": "ETA Conflict",
+      "passed": false,
+      "latencyMs": 963.059541999999,
+      "failures": [
+        "FAIL: ETA conflict detected (got=0, expected=>0)"
+      ],
+      "mapMatchConfidence": 0.9004968725483895,
+      "threatsCount": 0,
+      "serverTime": 1780082635876
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 1,
+    "avgLatencyMs": 1338.4274227142853,
+    "worstLatencyMs": 3969.786417,
+    "mapMatchPassRate": "80"
+  }
+}

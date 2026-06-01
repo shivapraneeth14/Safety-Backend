@@ -1,0 +1,872 @@
+{
+  "specVersion": "1.0",
+  "frozen": true,
+  "description": "Scenario Test Specification for Safety App v2.0 — Uncertainty-first collision avoidance system",
+  "goldenDataset": ["G-01","G-02","G-03","G-04","G-05","G-06","G-07","G-08","G-09","G-10"],
+  "killCriteria": {
+    "mapMatching": {
+      "goldenScenarios": ["G-03","G-04","G-05"],
+      "minAccuracy": 0.85,
+      "maxIterations": 3
+    },
+    "etaRegistry": {
+      "goldenScenarios": ["G-01","G-08"],
+      "maxAvgErrorMeters": 1.5,
+      "maxPercentOver3sError": 20,
+      "maxIterations": 2
+    },
+    "collisionProbability": {
+      "goldenScenarios": "ALL",
+      "maxFPR": 25,
+      "minRecall": 70,
+      "maxIterations": 2
+    },
+    "alertConfidence": {
+      "goldenScenarios": "ALL",
+      "maxCalibrationError": 15,
+      "maxIterations": 2
+    },
+    "timeSync": {
+      "redTeamScenarios": ["RT-02"],
+      "maxUndetectedOffsetMs": 200,
+      "maxIterations": 2
+    }
+  },
+  "metricsDashboard": {
+    "precision": { "target": 90, "unit": "%" },
+    "recall": { "target": 85, "unit": "%" },
+    "falsePositiveRate": { "target": 10, "unit": "%" },
+    "avgWarningTime": { "target": 3, "unit": "s" },
+    "confidenceCalibrationError": { "target": 10, "unit": "%" },
+    "mapMatchAccuracy": { "target": 95, "unit": "%" },
+    "etaErrorRMS": { "target": 1.5, "unit": "s" },
+    "wsLatencyP50": { "target": 50, "unit": "ms" },
+    "wsLatencyP95": { "target": 150, "unit": "ms" },
+    "wsLatencyP99": { "target": 300, "unit": "ms" }
+  },
+  "scenarios": {
+    "golden": [
+      {
+        "id": "G-01",
+        "group": "A",
+        "name": "Head-on approach",
+        "description": "Two vehicles approaching each other on the same road, same lane",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 35, "pos_m": [100, 0] }
+        ],
+        "expected": {
+          "alert": true,
+          "severity": "critical",
+          "minConfidence": 0.8,
+          "minLeadTimeSeconds": 3,
+          "type": "predicted_collision"
+        }
+      },
+      {
+        "id": "G-02",
+        "group": "A",
+        "name": "Blind junction",
+        "description": "Two vehicles approaching a T-junction with building blocking line-of-sight",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 30, "junction_distance_m": 40, "tags": { "approaching_junction": true } },
+          { "id": "B", "road": "road_2", "heading": 0, "speed_kmh": 25, "junction_distance_m": 35, "tags": { "approaching_junction": true } }
+        ],
+        "env": { "junction_type": "t_junction", "blind": true },
+        "expected": {
+          "alert": true,
+          "severity": "critical",
+          "minConfidence": 0.7,
+          "minLeadTimeSeconds": 2,
+          "type": "turn_collision"
+        }
+      },
+      {
+        "id": "G-03",
+        "group": "B",
+        "name": "Parallel roads (must NOT alert)",
+        "description": "Two vehicles on parallel roads with no connecting byways — no collision possible",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_2", "heading": 90, "speed_kmh": 30, "pos_m": [0, 15], "tags": { "parallel_road": true, "no_connection": true } }
+        ],
+        "expected": {
+          "alert": false
+        }
+      },
+      {
+        "id": "G-04",
+        "group": "B",
+        "name": "Flyover (must NOT alert)",
+        "description": "Vehicle on flyover bridge, vehicle on surface road directly below — vertical separation",
+        "vehicles": [
+          { "id": "A", "road": "road_flyover", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0], "tags": { "layer": 1, "bridge": true } },
+          { "id": "B", "road": "road_surface", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0], "tags": { "layer": 0, "tunnel": false } }
+        ],
+        "env": { "vertical_separation_m": 8 },
+        "expected": {
+          "alert": false
+        }
+      },
+      {
+        "id": "G-05",
+        "group": "C",
+        "name": "GPS drift 15m from road",
+        "description": "Vehicle GPS shows position 15m off the actual road — map matching must snap back",
+        "vehicles": [
+          { "id": "A", "true_road": "road_1", "heading": 90, "speed_kmh": 40, "true_pos_m": [0, 0], "gps_offset_m": [0, 15] }
+        ],
+        "expected": {
+          "alert": false,
+          "mapMatchConfidence": { "min": 0.7 },
+          "snappedRoad": "road_1",
+          "gpsRejected": false
+        }
+      },
+      {
+        "id": "G-06",
+        "group": "A",
+        "name": "Wrong direction",
+        "description": "Vehicle traveling opposite to traffic on same road",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 25, "pos_m": [80, 0] }
+        ],
+        "env": { "majority_heading": 90 },
+        "expected": {
+          "alert": true,
+          "severity": "critical",
+          "type": "wrong_direction",
+          "minConfidence": 0.7
+        }
+      },
+      {
+        "id": "G-07",
+        "group": "A",
+        "name": "Rear-end sudden braking",
+        "description": "Leader vehicle brakes hard, follower approaching too fast",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_history_kmh": [40, 35, 25, 15, 10], "speed_kmh": 10, "pos_m": [20, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 45, "pos_m": [0, 0] }
+        ],
+        "expected": {
+          "alert": true,
+          "severity": "high",
+          "type": "rear_end",
+          "minConfidence": 0.7,
+          "minLeadTimeSeconds": 1.5
+        }
+      },
+      {
+        "id": "G-08",
+        "group": "A",
+        "name": "Merge conflict",
+        "description": "Vehicle on main road, vehicle merging from on-ramp",
+        "vehicles": [
+          { "id": "A", "road": "road_main", "heading": 90, "speed_kmh": 50, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_onramp", "heading": 80, "speed_kmh": 40, "merge_distance_m": 60, "pos_m": [40, -10] }
+        ],
+        "env": { "merge_point_m": 60 },
+        "expected": {
+          "alert": true,
+          "severity": "high",
+          "minLeadTimeSeconds": 2,
+          "minConfidence": 0.6
+        }
+      },
+      {
+        "id": "G-09",
+        "group": "C",
+        "name": "Stale vehicle detection",
+        "description": "Vehicle B stops sending data — system must increase uncertainty and not trigger critical alerts",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [50, 0], "last_update_seconds_ago": 7 }
+        ],
+        "expected": {
+          "alert": false,
+          "staleClassification": "stale",
+          "predictionUncertaintyMultiplier": { "min": 2.0 }
+        }
+      },
+      {
+        "id": "G-10",
+        "group": "C",
+        "name": "OSM road missing",
+        "description": "Vehicle on newly built road not in OSM — system enters free-space mode without crashing",
+        "vehicles": [
+          { "id": "A", "road": null, "heading": 90, "speed_kmh": 30, "pos_m": [0, 0], "tags": { "osm_missing": true } }
+        ],
+        "expected": {
+          "alert": false,
+          "freeSpaceMode": true,
+          "roadConfidence": 0,
+          "noCrash": true
+        }
+      }
+    ],
+    "groupA_mustAlert": [
+      {
+        "id": "A-01",
+        "name": "Head-on close range",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 60, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 55, "pos_m": [60, 0] }
+        ],
+        "expected": { "alert": true, "severity": "critical", "minConfidence": 0.8, "minLeadTimeSeconds": 2 }
+      },
+      {
+        "id": "A-02",
+        "name": "Head-on far range",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 80, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 70, "pos_m": [300, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.6, "minLeadTimeSeconds": 5 }
+      },
+      {
+        "id": "A-03",
+        "name": "Cross intersection 4-way",
+        "vehicles": [
+          { "id": "A", "road": "road_ns", "heading": 0, "speed_kmh": 35, "junction_distance_m": 30 },
+          { "id": "B", "road": "road_ew", "heading": 90, "speed_kmh": 30, "junction_distance_m": 25 }
+        ],
+        "env": { "junction_type": "cross" },
+        "expected": { "alert": true, "severity": "critical", "minConfidence": 0.75, "minLeadTimeSeconds": 2 }
+      },
+      {
+        "id": "A-04",
+        "name": "Cross intersection both fast",
+        "vehicles": [
+          { "id": "A", "road": "road_ns", "heading": 0, "speed_kmh": 60, "junction_distance_m": 80 },
+          { "id": "B", "road": "road_ew", "heading": 90, "speed_kmh": 50, "junction_distance_m": 90 }
+        ],
+        "env": { "junction_type": "cross" },
+        "expected": { "alert": true, "severity": "critical", "minConfidence": 0.75, "minLeadTimeSeconds": 3 }
+      },
+      {
+        "id": "A-05",
+        "name": "T-junction vehicle on stem",
+        "vehicles": [
+          { "id": "A", "road": "road_stem", "heading": 90, "speed_kmh": 30, "junction_distance_m": 20 },
+          { "id": "B", "road": "road_top", "heading": 270, "speed_kmh": 40, "pos_m": [-50, 20] }
+        ],
+        "env": { "junction_type": "t_junction" },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.65, "minLeadTimeSeconds": 1.5 }
+      },
+      {
+        "id": "A-06",
+        "name": "Y-junction merge",
+        "vehicles": [
+          { "id": "A", "road": "road_left", "heading": 80, "speed_kmh": 40, "junction_distance_m": 35 },
+          { "id": "B", "road": "road_right", "heading": 100, "speed_kmh": 35, "junction_distance_m": 40 }
+        ],
+        "env": { "junction_type": "y_junction" },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.65, "minLeadTimeSeconds": 2 }
+      },
+      {
+        "id": "A-07",
+        "name": "Merge highway on-ramp close",
+        "vehicles": [
+          { "id": "A", "road": "road_main", "heading": 90, "speed_kmh": 70, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_onramp", "heading": 85, "speed_kmh": 50, "merge_distance_m": 30 }
+        ],
+        "expected": { "alert": true, "severity": "critical", "minConfidence": 0.75 }
+      },
+      {
+        "id": "A-08",
+        "name": "Rear-end gradual slowdown",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_history_kmh": [50, 45, 38, 30, 22], "speed_kmh": 22, "pos_m": [15, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 50, "pos_m": [0, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "type": "rear_end", "minConfidence": 0.6 }
+      },
+      {
+        "id": "A-09",
+        "name": "Wrong direction on highway",
+        "vehicles": [
+          { "id": "A", "road": "road_hwy", "heading": 90, "speed_kmh": 80, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_hwy", "heading": 270, "speed_kmh": 70, "pos_m": [200, 0] }
+        ],
+        "env": { "majority_heading": 90 },
+        "expected": { "alert": true, "severity": "critical", "type": "wrong_direction", "minConfidence": 0.8, "minLeadTimeSeconds": 4 }
+      },
+      {
+        "id": "A-10",
+        "name": "Blind crest approaching stopped vehicle",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [-60, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 0, "pos_m": [0, 0] }
+        ],
+        "env": { "blind_crest": true },
+        "expected": { "alert": true, "severity": "high", "type": "rear_end", "minConfidence": 0.65, "minLeadTimeSeconds": 3 }
+      },
+      {
+        "id": "A-11",
+        "name": "Offset junction",
+        "vehicles": [
+          { "id": "A", "road": "road_main", "heading": 90, "speed_kmh": 40, "junction_distance_m": 25 },
+          { "id": "B", "road": "road_side", "heading": 0, "speed_kmh": 30, "junction_distance_m": 30 }
+        ],
+        "env": { "junction_type": "offset_junction" },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.65, "minLeadTimeSeconds": 1.5 }
+      },
+      {
+        "id": "A-12",
+        "name": "Roundabout entry conflict",
+        "vehicles": [
+          { "id": "A", "road": "road_entry", "heading": 90, "speed_kmh": 25, "roundabout_distance_m": 15 },
+          { "id": "B", "road": "road_roundabout", "heading": 180, "speed_kmh": 20, "pos_m": [5, -10] }
+        ],
+        "env": { "junction_type": "roundabout" },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.6 }
+      },
+      {
+        "id": "A-13",
+        "name": "Pedestrian crossing",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_crosswalk", "heading": 0, "speed_kmh": 5, "pos_m": [25, 0] }
+        ],
+        "env": { "crosswalk": true },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.6 }
+      },
+      {
+        "id": "A-14",
+        "name": "Narrow road oncoming",
+        "vehicles": [
+          { "id": "A", "road": "road_narrow", "heading": 90, "speed_kmh": 20, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_narrow", "heading": 270, "speed_kmh": 20, "pos_m": [30, 0] }
+        ],
+        "env": { "road_width_m": 3 },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.65 }
+      },
+      {
+        "id": "A-15",
+        "name": "High-speed wrong direction",
+        "vehicles": [
+          { "id": "A", "road": "road_hwy", "heading": 90, "speed_kmh": 100, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_hwy", "heading": 270, "speed_kmh": 90, "pos_m": [500, 0] }
+        ],
+        "env": { "majority_heading": 90 },
+        "expected": { "alert": true, "severity": "critical", "type": "wrong_direction", "minConfidence": 0.85, "minLeadTimeSeconds": 6 }
+      },
+      {
+        "id": "A-16",
+        "name": "Two-wheeler filtering stopped traffic",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 15, "pos_m": [0, 0], "tags": { "vehicle_type": "two-wheeler", "lane_splitting": true } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 0, "pos_m": [12, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "type": "predicted_collision", "minConfidence": 0.6 }
+      },
+      {
+        "id": "A-17",
+        "name": "Slip road weave",
+        "vehicles": [
+          { "id": "A", "road": "road_main", "heading": 90, "speed_kmh": 55, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_slip", "heading": 100, "speed_kmh": 45, "weave_distance_m": 45 }
+        ],
+        "env": { "slip_road": true },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.65, "minLeadTimeSeconds": 2 }
+      },
+      {
+        "id": "A-18",
+        "name": "School zone low speed conflict",
+        "vehicles": [
+          { "id": "A", "road": "road_school", "heading": 90, "speed_kmh": 15, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_school", "heading": 270, "speed_kmh": 10, "pos_m": [20, 0] }
+        ],
+        "env": { "school_zone": true },
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.6 }
+      },
+      {
+        "id": "A-19",
+        "name": "Exit ramp conflict",
+        "vehicles": [
+          { "id": "A", "road": "road_main", "heading": 90, "speed_kmh": 60, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_exit", "heading": 135, "speed_kmh": 40, "exit_distance_m": 50 }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.65 }
+      },
+      {
+        "id": "A-20",
+        "name": "Construction zone merge",
+        "vehicles": [
+          { "id": "A", "road": "road_1_lane_closed", "heading": 90, "speed_kmh": 20, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1_lane_closed", "heading": 90, "speed_kmh": 25, "pos_m": [15, 0], "tags": { "merge_required": true } }
+        ],
+        "env": { "construction": true },
+        "expected": { "alert": true, "severity": "high", "type": "predicted_collision", "minConfidence": 0.6 }
+      }
+    ],
+    "groupB_mustNotAlert": [
+      {
+        "id": "B-01",
+        "name": "Parallel roads both directions",
+        "vehicles": [
+          { "id": "A", "road": "road_a", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_b", "heading": 270, "speed_kmh": 35, "pos_m": [50, 15], "tags": { "parallel": true, "no_connection": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-02",
+        "name": "Same road safe following distance",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [100, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 38, "pos_m": [0, 0] }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-03",
+        "name": "Vehicle moving away",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 60, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [-100, 0] }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-04",
+        "name": "Flyover with layer tags",
+        "vehicles": [
+          { "id": "A", "road": "road_bridge", "heading": 90, "speed_kmh": 50, "pos_m": [0, 0], "tags": { "layer": 1, "bridge": true } },
+          { "id": "B", "road": "road_below", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0], "tags": { "layer": -1, "tunnel": false } }
+        ],
+        "env": { "vertical_separation_m": 12 },
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-05",
+        "name": "Service road beside highway",
+        "vehicles": [
+          { "id": "A", "road": "road_highway", "heading": 90, "speed_kmh": 80, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_service", "heading": 90, "speed_kmh": 20, "pos_m": [20, 20], "tags": { "parallel": true, "separated": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-06",
+        "name": "Divided highway opposite directions",
+        "vehicles": [
+          { "id": "A", "road": "road_hwy_nb", "heading": 0, "speed_kmh": 70, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_hwy_sb", "heading": 180, "speed_kmh": 65, "pos_m": [0, 20], "tags": { "median_separated": true, "no_crossing": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-07",
+        "name": "Same speed same direction safe distance",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 50, "pos_m": [100, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 50, "pos_m": [0, 0] }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-08",
+        "name": "Roundabout same direction different exits",
+        "vehicles": [
+          { "id": "A", "road": "road_roundabout", "heading": 270, "speed_kmh": 20, "pos_m": [10, 0], "tags": { "exiting_next": true } },
+          { "id": "B", "road": "road_roundabout", "heading": 270, "speed_kmh": 20, "pos_m": [0, 0], "tags": { "exiting_second": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-09",
+        "name": "Bike lane separated from car lane",
+        "vehicles": [
+          { "id": "A", "road": "road_bike_lane", "heading": 90, "speed_kmh": 15, "pos_m": [0, 0], "tags": { "cycleway": true } },
+          { "id": "B", "road": "road_main", "heading": 90, "speed_kmh": 40, "pos_m": [0, 5], "tags": { "separated_cycleway": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-10",
+        "name": "Opposite side of divided road",
+        "vehicles": [
+          { "id": "A", "road": "road_divided_nb", "heading": 0, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_divided_sb", "heading": 180, "speed_kmh": 30, "pos_m": [0, -18], "tags": { "divided_road": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-11",
+        "name": "Crossing at different elevations (tunnel)",
+        "vehicles": [
+          { "id": "A", "road": "road_surface", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_tunnel", "heading": 0, "speed_kmh": 35, "pos_m": [0, 0], "tags": { "tunnel": true, "layer": -2 } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-12",
+        "name": "Pedestrian sidewalk (vehicle vs pedestrian)",
+        "vehicles": [
+          { "id": "A", "road": "road_main", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_sidewalk", "heading": 0, "speed_kmh": 5, "pos_m": [12, 8], "tags": { "sidewalk": true, "pedestrian": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-13",
+        "name": "Vehicle parked / stationary",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 0, "speed_kmh": 0, "pos_m": [50, 3], "tags": { "parked": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-14",
+        "name": "Cul-de-sac both vehicles moving away",
+        "vehicles": [
+          { "id": "A", "road": "road_culdesac", "heading": 270, "speed_kmh": 10, "pos_m": [5, 0] },
+          { "id": "B", "road": "road_culdesac", "heading": 270, "speed_kmh": 5, "pos_m": [-5, 0] }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-15",
+        "name": "Different floors of parking garage",
+        "vehicles": [
+          { "id": "A", "road": "road_garage_1f", "heading": 90, "speed_kmh": 10, "pos_m": [0, 0], "tags": { "level": 1, "indoor": true } },
+          { "id": "B", "road": "road_garage_2f", "heading": 90, "speed_kmh": 10, "pos_m": [0, 0], "tags": { "level": 2, "indoor": true } }
+        ],
+        "env": { "vertical_separation_m": 4 },
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-16",
+        "name": "Rail crossing — train on tracks",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 25, "pos_m": [20, 0] },
+          { "id": "B", "road": "rail_track", "heading": 0, "speed_kmh": 40, "pos_m": [0, 20], "tags": { "railway": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-17",
+        "name": "Two roadways of same highway separated by barrier",
+        "vehicles": [
+          { "id": "A", "road": "road_hwy_east", "heading": 90, "speed_kmh": 60, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_hwy_west", "heading": 270, "speed_kmh": 65, "pos_m": [100, 25], "tags": { "barrier_separated": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-18",
+        "name": "One vehicle in opposite lane no intersection",
+        "vehicles": [
+          { "id": "A", "road": "road_2lane", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_2lane", "heading": 270, "speed_kmh": 30, "pos_m": [100, 6], "tags": { "opposite_lane": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-19",
+        "name": "Hard shoulder breakdown with hazard lights",
+        "vehicles": [
+          { "id": "A", "road": "road_hwy", "heading": 90, "speed_kmh": 70, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_hwy", "heading": 90, "speed_kmh": 0, "pos_m": [40, 4], "tags": { "hard_shoulder": true, "hazard_lights": true } }
+        ],
+        "expected": { "alert": false }
+      },
+      {
+        "id": "B-20",
+        "name": "Different road classes no junction (motorway vs service)",
+        "vehicles": [
+          { "id": "A", "road": "road_motorway", "heading": 90, "speed_kmh": 100, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_service_parallel", "heading": 90, "speed_kmh": 20, "pos_m": [20, 30], "tags": { "no_access_to_motorway": true } }
+        ],
+        "expected": { "alert": false }
+      }
+    ],
+    "groupC_degradedData": [
+      {
+        "id": "C-01",
+        "name": "GPS accuracy 30m",
+        "vehicles": [
+          { "id": "A", "true_road": "road_1", "heading": 90, "speed_kmh": 40, "gps_accuracy_m": 30 },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 35, "pos_m": [80, 0] }
+        ],
+        "expected": { "alert": true, "severity": "critical", "minConfidence": 0.6, "uncertaintyIncreased": true }
+      },
+      {
+        "id": "C-02",
+        "name": "GPS accuracy 50m no alert",
+        "vehicles": [
+          { "id": "A", "true_road": "road_1", "heading": 90, "speed_kmh": 30, "gps_accuracy_m": 50 },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [100, 0] }
+        ],
+        "expected": { "alert": false, "mapMatchConfidence": { "max": 0.5 } }
+      },
+      {
+        "id": "C-03",
+        "name": "GPS dropout 3 seconds",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0], "simulateDropout": { "from": 2, "to": 5 } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 35, "pos_m": [60, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "usedDeadReckoning": true }
+      },
+      {
+        "id": "C-04",
+        "name": "Compass failure",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 20, "pos_m": [0, 0], "tags": { "compass_unstable": true } },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 20, "pos_m": [35, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.55, "headingConfidenceDecreased": true }
+      },
+      {
+        "id": "C-05",
+        "name": "Gyro noise high",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0], "tags": { "gyro_noise_deg_s": 15 } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [80, 0] }
+        ],
+        "expected": { "alert": false, "uncertaintyIncreased": true }
+      },
+      {
+        "id": "C-06",
+        "name": "Network latency 300ms",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 60, "pos_m": [0, 0], "tags": { "network_rtt_ms": 300 } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 55, "pos_m": [100, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.6, "latencyAdjusted": true }
+      },
+      {
+        "id": "C-07",
+        "name": "Network latency 1000ms",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0], "tags": { "network_rtt_ms": 1000 } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 35, "pos_m": [60, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "predictionHorizonReduced": true }
+      },
+      {
+        "id": "C-08",
+        "name": "Clock offset 500ms",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0], "tags": { "clock_offset_ms": 500 } },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 35, "pos_m": [80, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.55, "etaConfidenceReduced": true }
+      },
+      {
+        "id": "C-09",
+        "name": "Packet loss 20%",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0], "tags": { "packet_loss_pct": 20 } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 35, "pos_m": [70, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.6 }
+      },
+      {
+        "id": "C-10",
+        "name": "Vehicle on unclassified road (low OSM confidence)",
+        "vehicles": [
+          { "id": "A", "road": "road_unclassified", "heading": 90, "speed_kmh": 25, "pos_m": [0, 0], "tags": { "highway_type": "unclassified", "osm_age_days": 800 } },
+          { "id": "B", "road": "road_unclassified", "heading": 270, "speed_kmh": 20, "pos_m": [30, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.5, "roadConfidence": { "max": 0.7 } }
+      },
+      {
+        "id": "C-11",
+        "name": "Dual GPS (both vehicles high error)",
+        "vehicles": [
+          { "id": "A", "true_road": "road_1", "heading": 90, "speed_kmh": 40, "gps_accuracy_m": 25 },
+          { "id": "B", "true_road": "road_1", "heading": 270, "speed_kmh": 35, "gps_accuracy_m": 30, "pos_m": [90, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "minConfidence": 0.5, "bothUncertaintyApplied": true }
+      },
+      {
+        "id": "C-12",
+        "name": "Map mismatch (vehicle wrongly snapped)",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_2_parallel", "heading": 90, "speed_kmh": 30, "pos_m": [5, 15], "wrongly_snapped_to": "road_1" }
+        ],
+        "expected": { "alert": false, "mapMismatchDetected": true }
+      },
+      {
+        "id": "C-13",
+        "name": "Elevation tag missing on flyover",
+        "vehicles": [
+          { "id": "A", "road": "road_bridge", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_below", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0] }
+        ],
+        "env": { "vertical_separation_m": 8 },
+        "expected": { "alert": true, "severity": "high", "legacyFallback": true, "futureFix": "layer_tags" }
+      },
+      {
+        "id": "C-14",
+        "name": "Sensor quality very low",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0], "tags": { "sensor_quality": 0.3 } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 30, "pos_m": [50, 0], "tags": { "sensor_quality": 0.4 } }
+        ],
+        "expected": { "alert": false, "highUncertaintySuppressed": true }
+      },
+      {
+        "id": "C-15",
+        "name": "Extended data gap (5s) then reconnection",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0], "simulateDropout": { "from": 3, "to": 8 } },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 35, "pos_m": [70, 0] }
+        ],
+        "expected": { "alert": true, "severity": "high", "predictionDegraded": true }
+      }
+    ],
+    "groupD_scale": [
+      {
+        "id": "D-01",
+        "name": "1 vehicle baseline",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] }
+        ],
+        "expected": { "alert": false, "maxProcessingTimeMs": 10 }
+      },
+      {
+        "id": "D-02",
+        "name": "10 vehicles",
+        "vehicles_count": 10,
+        "distribution": { "roads": 3, "headings": "mixed", "speeds_kmh": [10, 60] },
+        "expected": { "maxProcessingTimeMs": 50, "maxRedisCalls": 20 }
+      },
+      {
+        "id": "D-03",
+        "name": "50 vehicles",
+        "vehicles_count": 50,
+        "distribution": { "roads": 10, "headings": "mixed", "speeds_kmh": [0, 80] },
+        "expected": { "maxProcessingTimeMs": 150, "maxRedisCalls": 100 }
+      },
+      {
+        "id": "D-04",
+        "name": "100 vehicles",
+        "vehicles_count": 100,
+        "distribution": { "roads": 20, "headings": "mixed", "speeds_kmh": [0, 100] },
+        "expected": { "maxProcessingTimeMs": 300, "maxRedisCalls": 200 }
+      },
+      {
+        "id": "D-05",
+        "name": "500 vehicles stress test",
+        "vehicles_count": 500,
+        "distribution": { "roads": 50, "headings": "mixed", "speeds_kmh": [0, 120] },
+        "expected": { "maxProcessingTimeMs": 1000, "noCrash": true, "maxRedisCalls": 1000 }
+      }
+    ],
+    "groupE_redTeam": [
+      {
+        "id": "RT-01",
+        "group": "E",
+        "name": "GPS jumps 50m sideways then returns",
+        "description": "Vehicle GPS suddenly jumps 50m perpendicular to road for 2 seconds, then returns to correct position",
+        "vehicles": [
+          { "id": "A", "true_road": "road_1", "heading": 90, "speed_kmh": 40, "true_pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 35, "pos_m": [80, 0] }
+        ],
+        "simulation": {
+          "events": [
+            { "time_s": 2, "action": "gps_jump", "offset_m": [0, 50], "duration_s": 2 },
+            { "time_s": 4, "action": "gps_restore" }
+          ]
+        },
+        "expected": {
+          "alert": false,
+          "mapMatchConfidence_duringJump": { "max": 0.3 },
+          "kalmanRejectedJump": true,
+          "noFalseAlert": true
+        }
+      },
+      {
+        "id": "RT-02",
+        "group": "E",
+        "name": "Clock offset suddenly changes by 1 second",
+        "description": "Vehicle A's clock suddenly shifts +1000ms relative to server, simulating time sync failure",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 270, "speed_kmh": 35, "pos_m": [80, 0] }
+        ],
+        "simulation": {
+          "events": [
+            { "time_s": 3, "action": "shift_clock", "offset_ms": 1000 }
+          ]
+        },
+        "expected": {
+          "alert": true,
+          "severity": "high",
+          "timeSyncQuality_detected": true,
+          "etaConfidenceReduced": true,
+          "noCriticalAlertFromBadTime": true,
+          "minConfidence": 0.55
+        }
+      },
+      {
+        "id": "RT-03",
+        "group": "E",
+        "name": "OSM road completely missing",
+        "description": "Vehicle on a brand new road that does not exist in OSM at all — system must handle gracefully",
+        "vehicles": [
+          { "id": "A", "road": null, "heading": 90, "speed_kmh": 30, "pos_m": [0, 0], "tags": { "osm_missing_road": true } },
+          { "id": "B", "road": "road_known", "heading": 90, "speed_kmh": 30, "pos_m": [50, 0] }
+        ],
+        "expected": {
+          "alert": false,
+          "freeSpaceMode": true,
+          "roadConfidence_A": 0,
+          "noFalseAlertWithB": true,
+          "noCrash": true
+        }
+      },
+      {
+        "id": "RT-04",
+        "group": "E",
+        "name": "Vehicle disappears for 8 seconds then resumes",
+        "description": "Vehicle B stops transmitting data for 8 seconds (network loss), then resumes. System must handle gracefully.",
+        "vehicles": [
+          { "id": "A", "road": "road_1", "heading": 90, "speed_kmh": 40, "pos_m": [0, 0] },
+          { "id": "B", "road": "road_1", "heading": 90, "speed_kmh": 35, "pos_m": [60, 0] }
+        ],
+        "simulation": {
+          "events": [
+            { "time_s": 2, "action": "stop_transmitting", "vehicle": "B" },
+            { "time_s": 10, "action": "resume_transmitting", "vehicle": "B" }
+          ]
+        },
+        "expected": {
+          "alert": false,
+          "staleTimeline": {
+            "at_2s": "fresh",
+            "at_5s": "degraded",
+            "at_7s": "stale",
+            "at_10s_before_resume": "expired"
+          },
+          "predictionUncertainty_increased": true,
+          "noFalseAlertDuringGap": true
+        }
+      },
+      {
+        "id": "RT-05",
+        "group": "E",
+        "name": "Two parallel flyovers 10m vertical separation, same horizontal position",
+        "description": "Two vehicles at the same lat/lng but different elevations (flyover and surface road). OSM has layer tags.",
+        "vehicles": [
+          { "id": "A", "road": "road_flyover", "heading": 90, "speed_kmh": 50, "pos_m": [0, 0], "tags": { "layer": 1, "bridge": true } },
+          { "id": "B", "road": "road_below", "heading": 90, "speed_kmh": 30, "pos_m": [0, 0], "tags": { "layer": 0 } }
+        ],
+        "env": { "vertical_separation_m": 10 },
+        "expected": {
+          "alert": false,
+          "layerDetection": true,
+          "elevationChecked": true
+        }
+      }
+    ]
+  }
+}

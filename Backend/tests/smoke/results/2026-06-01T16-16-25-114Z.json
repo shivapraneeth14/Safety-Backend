@@ -1,0 +1,113 @@
+{
+  "timestamp": "2026-06-01T16:16:25.117Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "Smoke-01",
+      "label": "G-03 Parallel",
+      "passed": true,
+      "latencyMs": 2029.3309169999998,
+      "failures": [],
+      "mapMatchConfidence": 0.7581226839079671,
+      "threatsCount": 0,
+      "serverTime": 1780330568077
+    },
+    {
+      "scenario": "Smoke-02",
+      "label": "G-04 Flyover",
+      "passed": true,
+      "latencyMs": 1693.832542,
+      "failures": [],
+      "mapMatchConfidence": 0.7590613853221214,
+      "threatsCount": 0,
+      "serverTime": 1780330569771
+    },
+    {
+      "scenario": "Smoke-03",
+      "label": "G-05 GPS Drift",
+      "passed": true,
+      "latencyMs": 889.6007500000001,
+      "failures": [],
+      "mapMatchConfidence": 0.6295165392065678,
+      "threatsCount": 0,
+      "serverTime": 1780330570662
+    },
+    {
+      "scenario": "Smoke-04",
+      "label": "RT-01 GPS Jump",
+      "passed": true,
+      "latencyMs": 7075.912042000001,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-05",
+      "label": "Time Sync",
+      "passed": true,
+      "latencyMs": 1979.6352920000008,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-06",
+      "label": "Road Bubble",
+      "passed": true,
+      "latencyMs": 377.5091659999998,
+      "failures": [],
+      "mapMatchConfidence": 0.7993351702884678,
+      "threatsCount": 0,
+      "serverTime": 1780330580096
+    },
+    {
+      "scenario": "Smoke-07",
+      "label": "ETA Conflict",
+      "passed": true,
+      "latencyMs": 1934.4487500000014,
+      "failures": [],
+      "mapMatchConfidence": 0.9004968725483895,
+      "threatsCount": 1,
+      "serverTime": 1780330582031
+    },
+    {
+      "scenario": "Smoke-08",
+      "label": "Road Curve",
+      "passed": true,
+      "latencyMs": 188.2917499999985,
+      "failures": [],
+      "mapMatchConfidence": 0.8244968725483897,
+      "threatsCount": 2,
+      "serverTime": 1780330582219
+    },
+    {
+      "scenario": "Smoke-09",
+      "label": "Uncertainty Growth",
+      "passed": true,
+      "latencyMs": 316.5245410000007,
+      "failures": [],
+      "mapMatchConfidence": 0.7993351702884678,
+      "threatsCount": 0,
+      "serverTime": 1780330582536
+    },
+    {
+      "scenario": "Smoke-10",
+      "label": "Probability Overlap",
+      "passed": true,
+      "latencyMs": 2577.0424170000006,
+      "failures": [],
+      "mapMatchConfidence": 0.6151572113561148,
+      "threatsCount": 0,
+      "serverTime": 1780330585113
+    }
+  ],
+  "summary": {
+    "passed": 10,
+    "failed": 0,
+    "avgLatencyMs": 1906.2128167000003,
+    "worstLatencyMs": 7075.912042000001,
+    "mapMatchPassRate": "75"
+  }
+}

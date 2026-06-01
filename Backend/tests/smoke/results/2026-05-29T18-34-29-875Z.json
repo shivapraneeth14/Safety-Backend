@@ -1,0 +1,70 @@
+{
+  "timestamp": "2026-05-29T18:34:29.876Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-03",
+      "label": "G-05 GPS Drift",
+      "passed": false,
+      "latencyMs": 114.46362500000032,
+      "failures": [
+        "FAIL: match confidence >= 0.70 (got=0.43606274334201517, expected=>=0.70)",
+        "FAIL: distToRoad < 3m (got=22.0, expected=<3m)"
+      ],
+      "mapMatchConfidence": 0.43606274334201517,
+      "threatsCount": 0,
+      "serverTime": 1780079653749
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    }
+  ],
+  "summary": {
+    "passed": 0,
+    "failed": 5,
+    "avgLatencyMs": 114.46362500000032,
+    "worstLatencyMs": 114.46362500000032,
+    "mapMatchPassRate": "0"
+  }
+}

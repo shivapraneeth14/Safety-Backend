@@ -1,0 +1,123 @@
+{
+  "timestamp": "2026-06-01T15:51:02.542Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (8000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    }
+  ],
+  "summary": {
+    "passed": 0,
+    "failed": 10,
+    "avgLatencyMs": 0,
+    "worstLatencyMs": 0,
+    "mapMatchPassRate": "N/A"
+  }
+}

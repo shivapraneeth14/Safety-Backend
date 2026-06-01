@@ -1,0 +1,94 @@
+{
+  "timestamp": "2026-05-29T18:56:43.856Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "Smoke-01",
+      "label": "G-03 Parallel",
+      "passed": true,
+      "latencyMs": 483.186458,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-02",
+      "label": "G-04 Flyover",
+      "passed": true,
+      "latencyMs": 465.49524999999994,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-03",
+      "label": "G-05 GPS Drift",
+      "passed": false,
+      "latencyMs": 587.7693750000001,
+      "failures": [
+        "No mapMatch data returned"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-04",
+      "label": "RT-01 GPS Jump",
+      "passed": false,
+      "latencyMs": 3199.012791,
+      "failures": [
+        "FAIL: Phase3: recovery confidence >= 0.70 (got=0, expected=>=0.70)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-05",
+      "label": "Time Sync",
+      "passed": false,
+      "latencyMs": 901.4213749999999,
+      "failures": [
+        "FAIL: serverTime present (got=undefined, expected=number)",
+        "FAIL: serverTime is valid number (got=undefined, expected=valid)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-06",
+      "label": "Road Bubble",
+      "passed": false,
+      "latencyMs": 844.7224589999996,
+      "failures": [
+        "FAIL: road bubble used (got=undefined, expected=true)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-07",
+      "label": "ETA Conflict",
+      "passed": false,
+      "latencyMs": 871.9186659999996,
+      "failures": [
+        "FAIL: ETA conflict detected (got=0, expected=>0)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 5,
+    "avgLatencyMs": 1050.5037677142857,
+    "worstLatencyMs": 3199.012791,
+    "mapMatchPassRate": "N/A"
+  }
+}

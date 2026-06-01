@@ -9,9 +9,14 @@ import router from "./Routes/User.routes.js";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import { createClient } from "redis";
+import { createHash } from "crypto";
 import Road from "./Models/Road.Model.js";
 import Turn from "./Models/Turn.Model.js";
 import TurningEvent from "./Models/TurningEvent.Model.js";
+import RoadGraph from "./roadGraph.js";
+import MapMatcher from "./mapMatcher.js";
+import EtaRegistry from "./etaRegistry.js";
+import { computePredictionUncertainty, computeOverlapProbability, classifyStaleness, classifyAlert, computeAlertConfidence } from "./degradation.js";
 
 dotenv.config();
 const app = express();
@@ -123,6 +128,23 @@ const NEARBY_CACHE_MOVE_THRESHOLD_M = 10;
 
 // One-way road cache (userId => last known oneway context)
 const onewayCache = new Map();
+
+// Sprint 1: Road graph, map matcher, ETA registry
+let roadGraph = null;
+let mapMatcher = null;
+let etaRegistry = null;
+
+// Road vehicle map: roadId → Set<userId>
+const roadVehicleMap = new Map();
+
+// Previous road map for continuity scoring
+const previousRoadMap = new Map();
+
+// Time sync tracking: userId → { offset, jitter, confidence }
+const timeSyncMap = new Map();
+
+// Tracking stale/expired vehicles
+const vehicleLastSeen = new Map();
 
 // Risk score tracking per junction (in-memory, resets on restart)
 // Key: "lat,lng" rounded to 4 decimals, Value: { nearMisses, brakeEvents, totalThreats }
@@ -240,6 +262,13 @@ function getStaleTimeout(speedMs) {
   if (speedMs < 5) return 10000; // 10s for slow traffic
   if (speedMs < 14) return 6000; // 6s for moderate speeds
   return 4000; // 4s for high speeds
+}
+
+const SERVER_VERSION = "sprint4";
+
+function deterministicThreatId(type, roadId, otherId, timeHorizon) {
+  const raw = `${type}|${roadId || "none"}|${otherId || "none"}|${Math.floor(timeHorizon || 0)}`;
+  return createHash("sha256").update(raw).digest("hex").substring(0, 12);
 }
 
 function computeSeverity(type, speedMs, ttc, distToTurn) {
@@ -479,14 +508,26 @@ wss.on("connection", (ws, req) => {
       authenticatedUserId = payload._id?.toString();
       console.log(`🔐 WebSocket authenticated for userId=${authenticatedUserId}`);
     } catch (err) {
-      console.warn("⚠️ WebSocket auth failed, rejecting connection");
-      ws.close(4001, "Invalid or expired token");
-      return;
+      // In dev mode, allow connections with a special dev token
+      if (process.env.DEV_MODE === "true" && token === "dev-token") {
+        authenticatedUserId = "dev-user";
+        console.log(`🔐 DEV MODE: WebSocket authenticated as dev-user`);
+      } else {
+        console.warn("⚠️ WebSocket auth failed, rejecting connection");
+        ws.close(4001, "Invalid or expired token");
+        return;
+      }
     }
   } else {
-    console.warn("⚠️ WebSocket connection without token, rejecting");
-    ws.close(4001, "Authentication required");
-    return;
+    // In dev mode, allow connections without a token
+    if (process.env.DEV_MODE === "true") {
+      authenticatedUserId = "dev-user";
+      console.log(`🔐 DEV MODE: WebSocket connected without token as dev-user`);
+    } else {
+      console.warn("⚠️ WebSocket connection without token, rejecting");
+      ws.close(4001, "Authentication required");
+      return;
+    }
   }
 
   ws._lastPong = Date.now();
@@ -505,14 +546,16 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      // WebSocket rate limiting
-      const now_ws = Date.now();
-      const lastMsg = wsMessageTimestamps.get(authenticatedUserId) || 0;
-      if (now_ws - lastMsg < 800) {
-        console.warn(`⚠️ Rate limiting WS messages for ${authenticatedUserId}`);
-        return;
+      // WebSocket rate limiting (disabled in dev mode)
+      if (process.env.DEV_MODE !== "true") {
+        const now_ws = Date.now();
+        const lastMsg = wsMessageTimestamps.get(authenticatedUserId) || 0;
+        if (now_ws - lastMsg < 800) {
+          console.warn(`⚠️ Rate limiting WS messages for ${authenticatedUserId}`);
+          return;
+        }
+        wsMessageTimestamps.set(authenticatedUserId, now_ws);
       }
-      wsMessageTimestamps.set(authenticatedUserId, now_ws);
 
       const raw = typeof message === "string" ? message : message?.toString?.() ?? "";
       console.log("📥 Incoming WS raw:", raw);
@@ -527,8 +570,8 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      // FIX BUG #2: Enforce authenticated userId
-      if (data.userId !== authenticatedUserId) {
+      // FIX BUG #2: Enforce authenticated userId (skip in dev mode)
+      if (process.env.DEV_MODE !== "true" && data.userId !== authenticatedUserId) {
         console.warn(`⚠️ userId mismatch: data=${data.userId} auth=${authenticatedUserId}`);
         ws.send(JSON.stringify({ status: "error", reason: "userId mismatch" }));
         return;
@@ -551,15 +594,100 @@ wss.on("connection", (ws, req) => {
       const vehicleType = data.vehicleType || "two-wheeler";
       const isTwoWheeler = vehicleType === "two-wheeler";
 
+      // ─── Sprint 1: Time Sync ───
+      const clientTimeMs = typeof data.clientTime === "number" ? data.clientTime : Date.now();
+      const serverTimeMs = Date.now();
+      const rttEstimate = data.serverTime ? (serverTimeMs - clientTimeMs) : 0;
+      const timeOffset = data.serverTime ? Math.floor((serverTimeMs - clientTimeMs) / 2) : 0;
+
+      let timeSyncEntry = timeSyncMap.get(data.userId) || { offsets: [], confidence: 1.0 };
+      if (data.serverTime) {
+        timeSyncEntry.offsets.push(timeOffset);
+        if (timeSyncEntry.offsets.length > 20) timeSyncEntry.offsets.shift();
+        const meanOffset = timeSyncEntry.offsets.reduce((a, b) => a + b, 0) / timeSyncEntry.offsets.length;
+        const variance = timeSyncEntry.offsets.reduce((a, b) => a + (b - meanOffset) ** 2, 0) / timeSyncEntry.offsets.length;
+        const stdDev = Math.sqrt(variance);
+        timeSyncEntry.confidence = Math.max(0.1, Math.min(1.0, 1.0 - stdDev / 500));
+        timeSyncEntry.offset = meanOffset;
+      }
+      timeSyncMap.set(data.userId, timeSyncEntry);
+
+      // ─── Sprint 1: Map Matching ───
+      const sensorQuality = data.sensorQuality ?? 0.8;
+      const positionUncertainty = data.positionUncertainty ?? 10;
+      const vehicleSpeed = Math.max(0, Number(data.speed ?? 0));
+
+      let matched = {
+        matched: false,
+        roadId: null,
+        snappedLat: data.latitude,
+        snappedLng: data.longitude,
+        roadHeading: data.heading ?? 0,
+        matchConfidence: 0,
+        vehicleStateConfidence: 0.5,
+      };
+
+      if (roadGraph && roadGraph.initialized && mapMatcher) {
+        matched = await mapMatcher.match(
+          data.userId,
+          data.latitude,
+          data.longitude,
+          data.heading ?? 0,
+          vehicleSpeed,
+          positionUncertainty,
+          serverTimeMs
+        );
+      }
+
+      // ─── Track vehicle on road ───
+      const prevRoadId = previousRoadMap.get(data.userId);
+      previousRoadMap.set(data.userId, matched.roadId);
+      if (prevRoadId && prevRoadId !== matched.roadId) {
+        const prevSet = roadVehicleMap.get(prevRoadId);
+        if (prevSet) prevSet.delete(data.userId);
+      }
+      if (matched.roadId) {
+        if (!roadVehicleMap.has(matched.roadId)) roadVehicleMap.set(matched.roadId, new Set());
+        roadVehicleMap.get(matched.roadId).add(data.userId);
+      }
+
+      // ─── Track last seen ───
+      vehicleLastSeen.set(data.userId, serverTimeMs);
+
+      // ─── Build enriched payload for Redis ───
+      const storePayload = {
+        ...data,
+        rawLatitude: data.latitude,
+        rawLongitude: data.longitude,
+        latitude: matched.snappedLat,
+        longitude: matched.snappedLng,
+        heading: matched.roadHeading ?? data.heading ?? 0,
+        roadId: matched.roadId,
+        roadName: matched.roadName,
+        highway: matched.highway,
+        matchConfidence: matched.matchConfidence,
+        vehicleStateConfidence: matched.vehicleStateConfidence,
+        roadConfidence: matched.roadConfidence ?? 0,
+        distanceToRoad: matched.distanceToRoad ?? null,
+        oneway: matched.oneway,
+        maxspeed: matched.maxspeed,
+        lanes: matched.lanes,
+        sensorQuality,
+        positionUncertainty,
+        timeSyncConfidence: timeSyncEntry.confidence,
+        serverTime: serverTimeMs,
+        staleness: "fresh",
+      };
+
       // Persist geo to Redis (GEOADD)
       if (redisConnected && redisClient) {
         try {
           await redisClient.geoAdd("users", {
-            longitude: data.longitude,
-            latitude: data.latitude,
+            longitude: storePayload.longitude,
+            latitude: storePayload.latitude,
             member: data.userId,
           });
-          console.log(`🗺️ GEOADD users ${data.userId} @ ${data.latitude},${data.longitude}`);
+          console.log(`🗺️ GEOADD users ${data.userId} @ ${storePayload.latitude},${storePayload.longitude}`);
         } catch (e) {
           console.error("❌ Redis GEOADD failed:", e);
         }
@@ -567,7 +695,7 @@ wss.on("connection", (ws, req) => {
         // Persist full payload
         const ttl = data.speed > 5 ? 10 : 30;
         try {
-          await redisClient.set(`userData:${data.userId}`, JSON.stringify(data), { EX: ttl });
+          await redisClient.set(`userData:${data.userId}`, JSON.stringify(storePayload), { EX: ttl });
           console.log(`💾 SET userData:${data.userId} (ttl=${ttl}s)`);
         } catch (e) {
           console.error("❌ Redis SET userData failed:", e);
@@ -576,7 +704,7 @@ wss.on("connection", (ws, req) => {
         // Without Redis, skip directly to empty response
         console.warn("⚠️ Redis not connected, sending empty threats");
         try {
-          ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: [] }));
+          ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: [], serverTime: serverTimeMs, serverVersion: SERVER_VERSION, }));
         } catch (e) {
           console.error("❌ Failed to send response:", e);
         }
@@ -617,20 +745,55 @@ wss.on("connection", (ws, req) => {
       let nearbyUserIds = [];
       let otherIds = [];
       let usersData = [];
+      let roadBubbleUsed = false;
+      let rawNearbyCount = 0;
 
       if (shouldRescan) {
-        try {
-          nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
-          console.log(`🔎 geoRadiusByMember found ${nearbyUserIds.length} members`);
-          nearbyCache.set(data.userId, {
-            nearbyIds: nearbyUserIds,
-            timestamp: Date.now(),
-            lat: data.latitude,
-            lng: data.longitude,
-          });
-        } catch (e) {
-          console.error("❌ Redis geoRadiusByMember failed:", e);
+        // ─── Sprint 2: Road Distance Bubble ───
+        if (matched.roadId && roadGraph && roadGraph.initialized) {
+          const horizonMeters = Math.min(vehicleSpeed * 8, 500);
+          const reachableRoads = roadGraph.getReachableRoads(matched.roadId, horizonMeters, vehicleSpeed, matched.roadHeading || data.heading || 0);
+          const reachableRoadIds = new Set(reachableRoads.map(r => r.roadId));
+          reachableRoadIds.add(matched.roadId);
+
+          const userIdsOnReachableRoads = new Set();
+          for (const rid of reachableRoadIds) {
+            const vehicles = roadVehicleMap.get(rid);
+            if (vehicles) {
+              for (const uid of vehicles) userIdsOnReachableRoads.add(uid);
+            }
+          }
+
+          // Also get Euclidean for vehicles not yet in road map (first message)
+          if (userIdsOnReachableRoads.size < 3) {
+            try {
+              const euclideanIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
+              for (const uid of euclideanIds) userIdsOnReachableRoads.add(uid);
+            } catch (e) {
+              console.error("❌ Redis geoRadiusByMember failed:", e);
+            }
+          }
+
+          nearbyUserIds = Array.from(userIdsOnReachableRoads);
+          rawNearbyCount = nearbyUserIds.length;
+          roadBubbleUsed = true;
+          console.log(`🔎 Road bubble: ${reachableRoadIds.size} roads, ${nearbyUserIds.length} users (horizon=${horizonMeters}m)`);
+        } else {
+          // Euclidean fallback
+          try {
+            nearbyUserIds = await redisClient.geoRadiusByMember("users", data.userId, nearbyRadius, "m", { COUNT: 50 });
+          } catch (e) {
+            console.error("❌ Redis geoRadiusByMember failed:", e);
+          }
+          rawNearbyCount = nearbyUserIds.length;
         }
+
+        nearbyCache.set(data.userId, {
+          nearbyIds: nearbyUserIds,
+          timestamp: Date.now(),
+          lat: data.latitude,
+          lng: data.longitude,
+        });
       } else {
         nearbyUserIds = prevCache.nearbyIds;
         console.log(`🔎 Using cached nearby list (${nearbyUserIds.length} members)`);
@@ -640,7 +803,29 @@ wss.on("connection", (ws, req) => {
       console.log(`👥 otherIds (excluding self): ${otherIds.length}`, otherIds);
 
       if (otherIds.length === 0) {
-        ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: [] }));
+        ws.send(JSON.stringify({
+          status: "received",
+          timestamp: new Date(),
+          serverTime: Date.now(),
+          serverVersion: SERVER_VERSION,
+          timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
+          threats: [],
+          mapMatch: {
+            matched: matched.matched,
+            confidence: matched.matchConfidence ?? 0,
+            roadId: matched.roadId,
+            snappedLat: matched.snappedLat,
+            snappedLng: matched.snappedLng,
+            distanceToRoad: matched.distanceToRoad ?? null,
+            vehicleStateConfidence: matched.vehicleStateConfidence ?? 0.5,
+          },
+          roadBubble: {
+            used: roadBubbleUsed,
+            rawCount: rawNearbyCount,
+            filteredCount: nearbyUserIds.length,
+            reduction: rawNearbyCount > 0 ? ((1 - nearbyUserIds.length / rawNearbyCount) * 100).toFixed(0) + "%" : "0%",
+          },
+        }));
         console.log("📤 No neighbors -> returning empty threats");
         return;
       }
@@ -651,6 +836,55 @@ wss.on("connection", (ws, req) => {
         console.log(`📦 mGet returned ${usersData.length} entries`);
       } catch (e) {
         console.error("❌ Redis mGet failed:", e);
+      }
+
+      // ─── Sprint 1: Road Eligibility Filter ───
+      const selfRoadId = matched.roadId;
+      if (selfRoadId && roadGraph && roadGraph.initialized) {
+        const filteredIds = [];
+        const filteredData = [];
+        for (let i = 0; i < otherIds.length; i++) {
+          const uid = otherIds[i];
+          const raw = usersData[i];
+          if (!raw) continue;
+          try {
+            const otherParsed = JSON.parse(raw);
+            const otherRoadId = otherParsed.roadId;
+            if (otherRoadId) {
+              if (roadGraph.areRoadsConnected(selfRoadId, otherRoadId, 2)) {
+                filteredIds.push(uid);
+                filteredData.push(raw);
+              } else {
+                console.log(`⏭️ Skipping ${uid} (road ${otherRoadId}) — not reachable from ${selfRoadId}`);
+              }
+            } else {
+              filteredIds.push(uid);
+              filteredData.push(raw);
+            }
+          } catch {
+            filteredIds.push(uid);
+            filteredData.push(raw);
+          }
+        }
+        otherIds = filteredIds;
+        usersData = filteredData;
+        console.log(`🔎 After road eligibility: ${otherIds.length} vehicles remain`);
+      }
+
+      // ─── Sprint 1: Staleness Check ───
+      const stalenessCache = new Map();
+      for (let i = otherIds.length - 1; i >= 0; i--) {
+        const uid = otherIds[i];
+        const lastSeen = vehicleLastSeen.get(uid);
+        if (lastSeen) {
+          const staleClass = classifyStaleness(lastSeen);
+          stalenessCache.set(uid, staleClass);
+          if (staleClass === "expired") {
+            otherIds.splice(i, 1);
+            usersData.splice(i, 1);
+            console.log(`⏳ Removed expired vehicle ${uid} from consideration`);
+          }
+        }
       }
 
       // local helper functions
@@ -685,9 +919,49 @@ wss.on("connection", (ws, req) => {
       const now = Date.now();
       const threats = [];
 
+      // ─── ETA Registry ───
+      if (etaRegistry && matched.matched) {
+        const tracks = etaRegistry.junctions.size;
+        etaRegistry.update(data.userId, matched, matched.snappedLat, matched.snappedLng, matched.roadHeading, vehicleSpeed, {
+          timeSyncQuality: timeSyncEntry.confidence,
+        });
+
+        const etaConflicts = etaRegistry.getPendingConflicts();
+        if (etaConflicts.length > 0) {
+          console.log(`🚦 ETA conflicts detected for ${data.userId}: ${etaConflicts.length} (tracks=${tracks})`);
+        }
+        for (const conflict of etaConflicts) {
+          if (conflict.probability > 0.3) {
+                const icAlertConf = computeAlertConfidence(
+                  conflict.probability,
+                  matched.matchConfidence || 0.5,
+                  sensorQuality,
+                  matched.roadConfidence || 0.5,
+                  matched.vehicleStateConfidence || 0.5
+                );
+                const icAlertClass = classifyAlert(icAlertConf, "balanced");
+                threats.push({
+                  type: "intersection_collision",
+                  id: conflict.vehicleB.userId,
+                  lat: conflict.junctionLat,
+                  lng: conflict.junctionLng,
+                  severity: conflict.probability > 0.7 ? 3 : 2,
+                  collisionProbability: conflict.probability,
+                  alertConfidence: icAlertConf,
+                  alertClass: icAlertClass,
+                  etaSelf: conflict.vehicleA.eta,
+                  etaOther: conflict.vehicleB.eta,
+              etaDiff: conflict.etaDiff,
+              junctionType: conflict.junctionType,
+              message: "🚦 Vehicles approaching same junction",
+            });
+          }
+        }
+      }
+
       // detection config
       // FIX BUG #8: Predicted collision uses 0.5s steps (10 checkpoints instead of 5)
-      const LOOKAHEAD_S = 5;
+      const LOOKAHEAD_S = 8;
       const PREDICT_STEP = 0.5;
 
       // maintain short in-memory speed history for self
@@ -697,9 +971,23 @@ wss.on("connection", (ws, req) => {
       global.speedHistory[data.userId].push({ speed: speedSelf, t: now });
       global.speedHistory[data.userId] = global.speedHistory[data.userId].slice(-10);
 
-      function predictPosition(lat, lon, heading, speed, t) {
-        const dist = speed * t;
-        return projectPoint(lat, lon, heading, dist);
+      function predictTrajectory(lat, lng, roadId, heading, speed, confidence, horizonSeconds) {
+        // Road-constrained trajectory if we have a road match
+        if (roadId && roadGraph && roadGraph.initialized && confidence >= 0.3) {
+          const trajectory = roadGraph.getTrajectory(roadId, lat, lng, heading, speed, horizonSeconds);
+          if (trajectory && trajectory.length > 0) return trajectory;
+        }
+        // Fallback: straight-line prediction
+        const points = [];
+        const stepS = 0.5;
+        const totalSteps = Math.ceil(horizonSeconds / stepS);
+        for (let step = 1; step <= totalSteps; step++) {
+          const t = step * stepS;
+          const dist = speed * t;
+          const p = projectPoint(lat, lng, heading, dist);
+          points.push({ lat: p.lat, lng: p.lng, t });
+        }
+        return points;
       }
 
       // FIX BUG #10: Majority direction calculated from OTHER vehicles only
@@ -862,18 +1150,71 @@ wss.on("connection", (ws, req) => {
             continue;
           }
 
-          // 1) Predicted collision check
-          // FIX BUG #8: Check at 0.5s intervals (more granular)
-          let collisionDetected = false;
-          for (let t = PREDICT_STEP; t <= LOOKAHEAD_S; t += PREDICT_STEP) {
-            const selfPred = predictPosition(data.latitude, data.longitude, headingSelf, speedSelf, t);
-            const otherPred = predictPosition(other.latitude, other.longitude, headingOther, speedOther, t);
-            const dPred = haversineMeters(selfPred.lat, selfPred.lng, otherPred.lat, otherPred.lng);
-            console.log(`🔮 predict t=${t.toFixed(1)}s for ${data.userId} vs ${uid} -> predictedDist=${dPred.toFixed(2)}m`);
-            if (dPred <= COLLISION_RADIUS) {
-              const severity = computeSeverity("predicted", speedSelf, t, distNow);
+          // 1) Predicted collision check — Sprint 3: Road-constrained trajectory + probability
+          const selfTrajectory = predictTrajectory(
+            data.latitude, data.longitude, matched.roadId,
+            headingSelf, speedSelf, matched.matchConfidence || 0, LOOKAHEAD_S
+          );
+          const otherTrajectory = predictTrajectory(
+            other.latitude, other.longitude, other.roadId,
+            headingOther, speedOther, other.matchConfidence || 0, LOOKAHEAD_S
+          );
 
-              // FIX BUG #29: Include severity
+          let highestCollisionProbability = 0;
+          let bestTimeHorizon = 0;
+          let bestPredDist = Infinity;
+
+          const maxSteps = Math.min(selfTrajectory.length, otherTrajectory.length);
+          for (let idx = 0; idx < maxSteps; idx++) {
+            const sp = selfTrajectory[idx];
+            const op = otherTrajectory[idx];
+            const t = sp.t || (idx + 1) * 0.5;
+            const dPred = haversineMeters(sp.lat, sp.lng, op.lat, op.lng);
+
+            const selfUncertainty = computePredictionUncertainty({
+              timeHorizon: t,
+              speedMs: speedSelf,
+              sensorQuality: other.sensorQuality ?? 0.8,
+              mapMatchConfidence: other.matchConfidence ?? 0,
+              roadConfidence: other.roadConfidence ?? 0.5,
+              networkRttMs: 0,
+              positionUncertainty: other.positionUncertainty ?? 10,
+              timeSinceLastUpdateMs: 0,
+            });
+
+            const otherUncertainty = computePredictionUncertainty({
+              timeHorizon: t,
+              speedMs: speedOther,
+              sensorQuality: other.sensorQuality ?? 0.8,
+              mapMatchConfidence: other.matchConfidence ?? 0,
+              roadConfidence: other.roadConfidence ?? 0.5,
+              networkRttMs: 0,
+              positionUncertainty: other.positionUncertainty ?? 10,
+              timeSinceLastUpdateMs: other.serverTime ? (now - other.serverTime) : 0,
+            });
+
+            const collisionProb = computeOverlapProbability(dPred, selfUncertainty, otherUncertainty);
+
+            if (collisionProb > highestCollisionProbability) {
+              highestCollisionProbability = collisionProb;
+              bestTimeHorizon = t;
+              bestPredDist = dPred;
+            }
+          }
+
+          if (highestCollisionProbability > 0.2) {
+            const alertConfidence = computeAlertConfidence(
+              highestCollisionProbability,
+              matched.matchConfidence || 0.5,
+              sensorQuality,
+              matched.roadConfidence || 0.5,
+              matched.vehicleStateConfidence || 0.5
+            );
+
+            const alertClass = classifyAlert(alertConfidence, "balanced");
+            const severity = alertConfidence >= 0.7 ? 3 : alertConfidence >= 0.5 ? 2 : 1;
+
+            if (alertClass !== "ignore") {
               const payloadSelf = {
                 type: "predicted_collision",
                 id: other.userId ?? uid,
@@ -886,13 +1227,16 @@ wss.on("connection", (ws, req) => {
                     speed: speedOther,
                     heading: headingOther
                 },
-                future_distance_m: Number(dPred.toFixed(2)),
-                time_s: t,
+                future_distance_m: Number(bestPredDist.toFixed(2)),
+                time_s: bestTimeHorizon,
                 severity,
+                collisionProbability: highestCollisionProbability,
+                alertConfidence,
+                alertClass,
                 message: "⚠️ Predicted collision based on future paths"
               };
 
-              console.log("🚨 PREDICTED COLLISION detected:", payloadSelf);
+              console.log(`🚨 PREDICTED COLLISION: prob=${(highestCollisionProbability * 100).toFixed(0)}% conf=${(alertConfidence * 100).toFixed(0)}% class=${alertClass}`);
               threats.push(payloadSelf);
 
               const wsOther = userSockets.get(uid);
@@ -909,9 +1253,12 @@ wss.on("connection", (ws, req) => {
                       speed: speedSelf,
                       heading: headingSelf
                   },
-                  future_distance_m: Number(dPred.toFixed(2)),
-                  time_s: t,
+                  future_distance_m: Number(bestPredDist.toFixed(2)),
+                  time_s: bestTimeHorizon,
                   severity,
+                  collisionProbability: highestCollisionProbability,
+                  alertConfidence,
+                  alertClass,
                   message: "⚠️ Predicted collision based on future paths"
                 };
 
@@ -922,12 +1269,10 @@ wss.on("connection", (ws, req) => {
                   console.error(`❌ Failed to send predicted_collision to ${uid}:`, e);
                 }
               }
-
-              collisionDetected = true;
-              break;
+            } else {
+              console.log(`🔇 Predicted collision suppressed (confidence ${(alertConfidence * 100).toFixed(0)}% below alert threshold)`);
             }
           }
-          if (collisionDetected) continue;
 
           // 2) Rear-end detection
           // FIX BUG #9: Use median of last 5 speed samples, require 3 consecutive
@@ -1160,17 +1505,51 @@ wss.on("connection", (ws, req) => {
 
       // send threats back to origin + upcoming turns
       console.log(`📤 Finished checks. Returning ${threats.length} threat(s), ${upcomingTurns.length} upcoming turn(s) to ${data.userId}`);
+
+      // Sprint 1: Include time sync + road info in response
+      // Phase 1: Add deterministic threat IDs for replay validation
+      const selfRoad = matched.roadId ? roadGraph?.getRoad(matched.roadId) : null;
+
+      for (const t of threats) {
+        if (!t.threatId) {
+          t.threatId = deterministicThreatId(t.type, matched.roadId, t.id, t.time_s || t.eta || 0);
+        }
+      }
+
       try {
         ws.send(JSON.stringify({
-          status: "received",
+           status: "received",
           timestamp: new Date(),
+          serverTime: Date.now(),
+          serverVersion: SERVER_VERSION,
+          timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
           threats,
           upcomingTurns,
           currentRoadInfo: {
-            speedLimit: null,
-            isOneWay: null,
-            laneCount: null,
-            roadName: null,
+            speedLimit: selfRoad?.maxspeed || null,
+            isOneWay: matched.oneway || null,
+            laneCount: matched.lanes || null,
+            roadName: matched.roadName || selfRoad?.name || null,
+            highway: matched.highway || null,
+            roadId: matched.roadId,
+            roadConfidence: matched.roadConfidence ?? null,
+            matchConfidence: matched.matchConfidence ?? null,
+          },
+          mapMatch: {
+            matched: matched.matched,
+            confidence: matched.matchConfidence ?? 0,
+            roadId: matched.roadId,
+            roadName: matched.roadName,
+            highway: matched.highway,
+            snappedLat: matched.snappedLat,
+            snappedLng: matched.snappedLng,
+            vehicleStateConfidence: matched.vehicleStateConfidence ?? 0.5,
+          },
+          roadBubble: {
+            used: roadBubbleUsed,
+            rawCount: rawNearbyCount,
+            filteredCount: nearbyUserIds.length,
+            reduction: rawNearbyCount > 0 ? ((1 - nearbyUserIds.length / rawNearbyCount) * 100).toFixed(0) + "%" : "0%",
           },
         }));
       } catch (e) {
@@ -1209,14 +1588,32 @@ wss.on("connection", (ws, req) => {
   });
 }); // end wss.on("connection")
 
+// Sprint 1: Road graph initialization
+async function initRoadGraph() {
+  try {
+    roadGraph = new RoadGraph();
+    await roadGraph.loadFromMongo();
+    mapMatcher = new MapMatcher(roadGraph);
+    etaRegistry = new EtaRegistry(roadGraph);
+    etaRegistry.on("junctionConflict", (conflict) => {
+      console.log(`🚦 Junction conflict at ${conflict.junction}: probability=${(conflict.probability * 100).toFixed(0)}%`);
+    });
+    console.log("✅ Road graph, map matcher, and ETA registry initialized");
+  } catch (err) {
+    console.error("❌ Road graph initialization failed:", err.message);
+    console.warn("⚠️ Continuing without road graph (limited functionality)");
+  }
+}
+
 // Start Mongo + Redis + server
 async function startServer() {
   await initRedis();
 
   mongoose
     .connect(process.env.MONGO_URI)
-    .then(() => {
+    .then(async () => {
       console.log("✅ MongoDB connected");
+      await initRoadGraph();
       const PORT = process.env.PORT || 5000;
       server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
     })

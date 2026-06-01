@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-05-29T18:39:28.254Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "Smoke-01",
+      "label": "G-03 Parallel",
+      "passed": true,
+      "latencyMs": 825.903417,
+      "failures": [],
+      "mapMatchConfidence": 0.6411511913728216,
+      "threatsCount": 0,
+      "serverTime": 1780079962162
+    },
+    {
+      "scenario": "Smoke-02",
+      "label": "G-04 Flyover",
+      "passed": true,
+      "latencyMs": 640.9893330000001,
+      "failures": [],
+      "mapMatchConfidence": 0.6394327665436988,
+      "threatsCount": 0,
+      "serverTime": 1780079962804
+    },
+    {
+      "scenario": "Smoke-03",
+      "label": "G-05 GPS Drift",
+      "passed": false,
+      "latencyMs": 678.9385419999999,
+      "failures": [
+        "FAIL: match confidence >= 0.70 (got=0.5160910423470663, expected=>=0.70)"
+      ],
+      "mapMatchConfidence": 0.5160910423470663,
+      "threatsCount": 0,
+      "serverTime": 1780079963483
+    },
+    {
+      "scenario": "Smoke-04",
+      "label": "RT-01 GPS Jump",
+      "passed": false,
+      "latencyMs": 3792.2399589999995,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-05",
+      "label": "Time Sync",
+      "passed": false,
+      "latencyMs": 975.9653749999998,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 3,
+    "avgLatencyMs": 1382.8073252,
+    "worstLatencyMs": 3792.2399589999995,
+    "mapMatchPassRate": "0"
+  }
+}

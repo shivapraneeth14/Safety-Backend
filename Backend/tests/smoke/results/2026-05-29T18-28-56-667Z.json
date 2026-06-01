@@ -1,0 +1,68 @@
+{
+  "timestamp": "2026-05-29T18:28:56.668Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "Smoke-01",
+      "label": "G-03 Parallel",
+      "passed": true,
+      "latencyMs": 2408.003125,
+      "failures": [],
+      "mapMatchConfidence": 0.2753441221420508,
+      "threatsCount": 0,
+      "serverTime": 1780079318994
+    },
+    {
+      "scenario": "Smoke-02",
+      "label": "G-04 Flyover",
+      "passed": true,
+      "latencyMs": 1654.0633330000005,
+      "failures": [],
+      "mapMatchConfidence": 0,
+      "threatsCount": 0,
+      "serverTime": 1780079320648
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (3000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-04",
+      "label": "RT-01 GPS Jump",
+      "passed": false,
+      "latencyMs": 9873.588291,
+      "failures": [
+        "FAIL: Phase1: confidence >= 0.80 (got=0.6993023719371001, expected=>=0.80)",
+        "FAIL: Phase2: drift < 10m (got=43.7, expected=<10m)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "unknown",
+      "passed": false,
+      "latencyMs": 0,
+      "failures": [
+        "Uncaught exception: Response timeout (3000ms)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    }
+  ],
+  "summary": {
+    "passed": 2,
+    "failed": 3,
+    "avgLatencyMs": 4645.218249666667,
+    "worstLatencyMs": 9873.588291,
+    "mapMatchPassRate": "0"
+  }
+}
