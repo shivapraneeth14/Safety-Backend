@@ -39,8 +39,24 @@ class RoadGraph {
     console.log("🗺️ Loading road graph from MongoDB...");
 
     try {
-      // Use projection to only fetch needed fields (reduces transfer size from Atlas)
-      const roads = await Road.find({}, {
+      // Hyderabad bounding box (77k roads, ~92MB) — fits Render free tier
+      const HYDERABAD_BOX = {
+        $geoWithin: {
+          $geometry: {
+            type: "Polygon",
+            coordinates: [[
+              [78.35, 17.30],
+              [78.60, 17.30],
+              [78.60, 17.45],
+              [78.35, 17.45],
+              [78.35, 17.30]
+            ]]
+          }
+        }
+      };
+      const roads = await Road.find({
+        geometry: HYDERABAD_BOX
+      }, {
         osmId: 1, highway: 1, name: 1, nodes: 1, geometry: 1,
         oneway: 1, maxspeed: 1, lanes: 1, ref: 1, width: 1, surface: 1, junction: 1,
         osmAgeDays: 1,

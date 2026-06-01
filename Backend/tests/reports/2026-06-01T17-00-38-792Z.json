@@ -1,0 +1,323 @@
+{
+  "timestamp": "2026-06-01T17:00:38.793Z",
+  "summary": {
+    "totalScenarios": 10,
+    "passed": 10,
+    "failed": 0,
+    "precision": 1,
+    "recall": 1,
+    "falsePositiveRate": 0,
+    "accuracy": 1,
+    "f1Score": 1,
+    "avgWarningTime": 5.6,
+    "calibrationError": 0.29843014778352606,
+    "etaErrorRMS": 0,
+    "avgProcessingTimeMs": 176.80721728834368,
+    "p95ProcessingTimeMs": 317.1166669999948,
+    "mapMatchAccuracy": 0.9202453987730062
+  },
+  "golden": {
+    "gates": [
+      {
+        "id": "G-01",
+        "name": "G-01",
+        "passed": true,
+        "alerts": 10,
+        "reason": "OK"
+      },
+      {
+        "id": "G-02",
+        "name": "G-02",
+        "passed": true,
+        "alerts": 9,
+        "reason": "OK"
+      },
+      {
+        "id": "G-03",
+        "name": "G-03",
+        "passed": true,
+        "alerts": 0,
+        "reason": "OK"
+      },
+      {
+        "id": "G-04",
+        "name": "G-04",
+        "passed": true,
+        "alerts": 0,
+        "reason": "OK"
+      },
+      {
+        "id": "G-05",
+        "name": "G-05",
+        "passed": true,
+        "alerts": 0,
+        "reason": "OK"
+      },
+      {
+        "id": "G-06",
+        "name": "G-06",
+        "passed": true,
+        "alerts": 24,
+        "reason": "OK"
+      },
+      {
+        "id": "G-07",
+        "name": "G-07",
+        "passed": true,
+        "alerts": 9,
+        "reason": "OK"
+      },
+      {
+        "id": "G-08",
+        "name": "G-08",
+        "passed": true,
+        "alerts": 108,
+        "reason": "OK"
+      },
+      {
+        "id": "G-09",
+        "name": "G-09",
+        "passed": true,
+        "alerts": 0,
+        "reason": "OK"
+      },
+      {
+        "id": "G-10",
+        "name": "G-10",
+        "passed": true,
+        "alerts": 0,
+        "reason": "OK"
+      },
+      {
+        "id": "PRECISION",
+        "name": "Precision > 85%",
+        "passed": true,
+        "actual": "100.0%"
+      },
+      {
+        "id": "RECALL",
+        "name": "Recall > 80%",
+        "passed": true,
+        "actual": "100.0%"
+      },
+      {
+        "id": "FPR",
+        "name": "False Positive Rate < 15%",
+        "passed": true,
+        "actual": "0.0%"
+      },
+      {
+        "id": "CALIBRATION",
+        "name": "Calibration Error < 15%",
+        "passed": false,
+        "actual": "29.8%"
+      }
+    ],
+    "allPassed": false
+  },
+  "calibrationCurve": [],
+  "scenarios": [
+    {
+      "id": "G-01",
+      "name": "Head-on approach",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 10,
+      "errors": 0,
+      "mapMatches": 48,
+      "latencies": [
+        273.80825,
+        421.42758299999997,
+        131.45825000000002,
+        127.86708299999987,
+        181.5557080000001,
+        147.9588329999999,
+        169.76383299999998,
+        131.23325,
+        183.39829199999986,
+        243.53849999999966
+      ]
+    },
+    {
+      "id": "G-02",
+      "name": "Blind junction",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 9,
+      "errors": 0,
+      "mapMatches": 48,
+      "latencies": [
+        160.21279099999992,
+        98.79900000000089,
+        157.97437499999978,
+        67.21679099999892,
+        147.5758339999993,
+        93.11595800000032,
+        275.95158400000037,
+        169.77491699999882,
+        263.3217089999998,
+        140.70466699999997
+      ]
+    },
+    {
+      "id": "G-03",
+      "name": "Parallel roads (must NOT alert)",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 0,
+      "errors": 0,
+      "mapMatches": 24,
+      "latencies": [
+        150.49154199999975,
+        162.80637500000012,
+        161.0479579999992,
+        124.98608299999978,
+        179.3367909999979,
+        192.6491249999999,
+        566.7274590000015,
+        257.252625000001,
+        151.6049579999999,
+        121.9442080000008
+      ]
+    },
+    {
+      "id": "G-04",
+      "name": "Flyover (must NOT alert)",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 0,
+      "errors": 0,
+      "mapMatches": 24,
+      "latencies": [
+        167.7964580000007,
+        180.20391599999857,
+        128.22062500000175,
+        231.776041000001,
+        258.67825000000084,
+        145.4283749999995,
+        132.83387500000026,
+        157.41529099999752,
+        216.68591700000252,
+        127.2042079999992
+      ]
+    },
+    {
+      "id": "G-05",
+      "name": "GPS drift 15m from road",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 0,
+      "errors": 0,
+      "mapMatches": 12,
+      "latencies": [
+        258.6244169999991,
+        134.1733749999985,
+        513.9862090000024,
+        291.9258340000015,
+        564.364999999998,
+        258.3989580000052,
+        228.01937499999622,
+        189.94833300000028,
+        340.8412499999977,
+        233.61562499999854
+      ]
+    },
+    {
+      "id": "G-06",
+      "name": "Wrong direction",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 24,
+      "errors": 0,
+      "mapMatches": 48,
+      "latencies": [
+        269.28591599999345,
+        291.9968329999974,
+        530.9135830000014,
+        124.48816700000316,
+        139.4469590000008,
+        124.43000000000029,
+        397.0305420000004,
+        225.79716700000426,
+        219.46050000000105,
+        252.73966700000165
+      ]
+    },
+    {
+      "id": "G-07",
+      "name": "Rear-end sudden braking",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 9,
+      "errors": 0,
+      "mapMatches": 48,
+      "latencies": [
+        174.24474999999802,
+        167.05570799999987,
+        133.45500000000175,
+        125.70475000000442,
+        120.72908399999869,
+        116.09225000000151,
+        114.90754200000083,
+        116.66620899999543,
+        124.9585420000003,
+        114.00195900000108
+      ]
+    },
+    {
+      "id": "G-08",
+      "name": "Merge conflict",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 108,
+      "errors": 0,
+      "mapMatches": 48,
+      "latencies": [
+        153.5219170000055,
+        136.65024999999878,
+        311.9127080000035,
+        143.81212499999674,
+        132.127625000001,
+        128.57433300000412,
+        130.41170799999963,
+        153.64887499999895,
+        144.87412499999482,
+        175.49208299999736
+      ]
+    },
+    {
+      "id": "G-09",
+      "name": "Stale vehicle detection",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 0,
+      "errors": 0,
+      "mapMatches": 24,
+      "latencies": [
+        145.1071670000092,
+        125.23458300001221,
+        138.91858300000604,
+        128.14891600000556,
+        177.39520800000173,
+        203.62366699999257,
+        137.83287499999278,
+        157.84558399999514,
+        162.7817090000026,
+        113.80316599999787
+      ]
+    },
+    {
+      "id": "G-10",
+      "name": "OSM road missing",
+      "group": "GOLDEN",
+      "passed": true,
+      "alerts": 0,
+      "errors": 0,
+      "mapMatches": 2,
+      "latencies": [
+        137.96933300000092,
+        112.5267920000042
+      ]
+    }
+  ]
+}

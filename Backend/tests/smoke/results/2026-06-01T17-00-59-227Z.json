@@ -1,0 +1,113 @@
+{
+  "timestamp": "2026-06-01T17:00:59.228Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "Smoke-01",
+      "label": "G-03 Parallel",
+      "passed": true,
+      "latencyMs": 678.9160420000001,
+      "failures": [],
+      "mapMatchConfidence": 0.7581226839079671,
+      "threatsCount": 0,
+      "serverTime": 1780333248788
+    },
+    {
+      "scenario": "Smoke-02",
+      "label": "G-04 Flyover",
+      "passed": true,
+      "latencyMs": 649.0230419999999,
+      "failures": [],
+      "mapMatchConfidence": 0.7590613853221214,
+      "threatsCount": 0,
+      "serverTime": 1780333249437
+    },
+    {
+      "scenario": "Smoke-03",
+      "label": "G-05 GPS Drift",
+      "passed": true,
+      "latencyMs": 701.0489170000001,
+      "failures": [],
+      "mapMatchConfidence": 0.6295165392065678,
+      "threatsCount": 0,
+      "serverTime": 1780333250139
+    },
+    {
+      "scenario": "Smoke-04",
+      "label": "RT-01 GPS Jump",
+      "passed": true,
+      "latencyMs": 4113.6825,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-05",
+      "label": "Time Sync",
+      "passed": true,
+      "latencyMs": 1192.058959,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-06",
+      "label": "Road Bubble",
+      "passed": true,
+      "latencyMs": 133.72895900000003,
+      "failures": [],
+      "mapMatchConfidence": 0.7993351702884678,
+      "threatsCount": 0,
+      "serverTime": 1780333255579
+    },
+    {
+      "scenario": "Smoke-07",
+      "label": "ETA Conflict",
+      "passed": true,
+      "latencyMs": 1469.6782079999994,
+      "failures": [],
+      "mapMatchConfidence": 0.9004968725483895,
+      "threatsCount": 1,
+      "serverTime": 1780333257049
+    },
+    {
+      "scenario": "Smoke-08",
+      "label": "Road Curve",
+      "passed": true,
+      "latencyMs": 220.66770800000086,
+      "failures": [],
+      "mapMatchConfidence": 0.8244968725483897,
+      "threatsCount": 2,
+      "serverTime": 1780333257270
+    },
+    {
+      "scenario": "Smoke-09",
+      "label": "Uncertainty Growth",
+      "passed": true,
+      "latencyMs": 138.10983300000044,
+      "failures": [],
+      "mapMatchConfidence": 0.7993351702884678,
+      "threatsCount": 0,
+      "serverTime": 1780333257409
+    },
+    {
+      "scenario": "Smoke-10",
+      "label": "Probability Overlap",
+      "passed": true,
+      "latencyMs": 1816.2782500000012,
+      "failures": [],
+      "mapMatchConfidence": 0.6151572113561148,
+      "threatsCount": 0,
+      "serverTime": 1780333259226
+    }
+  ],
+  "summary": {
+    "passed": 10,
+    "failed": 0,
+    "avgLatencyMs": 1111.3192418000003,
+    "worstLatencyMs": 4113.6825,
+    "mapMatchPassRate": "75"
+  }
+}
