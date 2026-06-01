@@ -61,8 +61,6 @@ class RoadGraph {
         osmAgeDays: 1,
       }).lean();
       console.log(`📦 Loaded ${roads.length} roads`);
-      const m = process.memoryUsage();
-      console.log("📊 Heap:", Math.round(m.heapUsed / 1024 / 1024), "MB");
 
       for (const road of roads) {
         const osmId = road.osmId;
