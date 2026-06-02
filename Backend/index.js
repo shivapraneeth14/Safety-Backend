@@ -1060,79 +1060,95 @@ wss.on("connection", (ws, req) => {
         // TURN COLLISION DETECTION
         // FIX BUG #7: Fire if EITHER vehicle detects the turn, not BOTH
         // FIX BUG #22: Remove +0.1 hack, check speed > 0.5 m/s before ETA
+        // FIX: Multi-turn support — check all turns[] in payload
         // ----------------------------------------------------
         try {
-          const selfTurn = data.turnAhead === true;
-          const otherTurn = other.turnAhead === true;
+          const selfHasTurn = data.turnAhead === true || (Array.isArray(data.turns) && data.turns.length > 0);
+          const otherHasTurn = other.turnAhead === true || (Array.isArray(other.turns) && other.turns.length > 0);
 
-          // Fire if EITHER vehicle detected a turn AND speeds > minimum
+          const selfTurns = data.turns && Array.isArray(data.turns) ? data.turns : [];
+          const otherTurns = other.turns && Array.isArray(other.turns) ? other.turns : [];
+
+          // Include legacy single-turn fields as fallback
+          if (!selfTurns.length && data.intersectionLat != null) {
+            selfTurns.push({ lat: data.intersectionLat, lng: data.intersectionLng, distance: 0, type: 'turn' });
+          }
+          if (!otherTurns.length && other.intersectionLat != null) {
+            otherTurns.push({ lat: other.intersectionLat, lng: other.intersectionLng, distance: 0, type: 'turn' });
+          }
+
           if (
-            (selfTurn || otherTurn) &&
-            data.intersectionLat != null &&
-            other.intersectionLat != null &&
+            selfHasTurn && otherHasTurn &&
+            selfTurns.length > 0 && otherTurns.length > 0 &&
             speedSelf > MIN_PREDICT_COLLISION_SPEED &&
             speedOther > MIN_PREDICT_COLLISION_SPEED
           ) {
-            const turnA = { lat: data.intersectionLat, lng: data.intersectionLng };
-            const turnB = { lat: other.intersectionLat, lng: other.intersectionLng };
+            let matched = false;
+            for (const tA of selfTurns) {
+              if (matched) break;
+              const aLat = tA.lat != null ? tA.lat : data.intersectionLat;
+              const aLng = tA.lng != null ? tA.lng : data.intersectionLng;
+              if (aLat == null || aLng == null) continue;
 
-            const turnDist = haversineMeters(turnA.lat, turnA.lng, turnB.lat, turnB.lng);
+              for (const tB of otherTurns) {
+                const bLat = tB.lat != null ? tB.lat : other.intersectionLat;
+                const bLng = tB.lng != null ? tB.lng : other.intersectionLng;
+                if (bLat == null || bLng == null) continue;
 
-            if (turnDist <= 8) {
-              const distSelfToTurn = haversineMeters(baseLat, baseLon, turnA.lat, turnA.lng);
-              const distOtherToTurn = haversineMeters(other.latitude, other.longitude, turnA.lat, turnA.lng);
+                const turnDist = haversineMeters(aLat, aLng, bLat, bLng);
+                if (turnDist > 8) continue;
 
-              // FIX BUG #22: Only compute ETA if speed is meaningful
-              let etaSelf = Infinity, etaOther = Infinity;
-              if (speedSelf > 0.5) etaSelf = distSelfToTurn / speedSelf;
-              if (speedOther > 0.5) etaOther = distOtherToTurn / speedOther;
+                const distSelfToTurn = haversineMeters(baseLat, baseLon, aLat, aLng);
+                const distOtherToTurn = haversineMeters(other.latitude, other.longitude, aLat, aLng);
 
-              console.log("TURN DATA RECEIVED:", data.intersectionLat, data.intersectionLng);
-              console.log("TURN MATCH DISTANCE:", turnDist);
-              console.log("TURN ETA SELF:", etaSelf);
-              console.log("TURN ETA OTHER:", etaOther);
+                let etaSelf = Infinity, etaOther = Infinity;
+                if (speedSelf > 0.5) etaSelf = distSelfToTurn / speedSelf;
+                if (speedOther > 0.5) etaOther = distOtherToTurn / speedOther;
 
-              // FIX BUG #7: Extended overlap window to 3 seconds
-              if (Math.abs(etaSelf - etaOther) <= 3.0) {
-                // Compute severity based on junction risk
-                const riskScore = getJunctionRiskScore(turnA.lat, turnA.lng);
-                const severity = computeSeverity("turn", speedSelf, Math.min(etaSelf, etaOther), distSelfToTurn);
+                console.log("TURN MATCH:", tA.type, "vs", tB.type, "dist:", turnDist.toFixed(1), "m");
+                console.log("TURN ETA SELF:", etaSelf.toFixed(1), "s OTHER:", etaOther.toFixed(1), "s");
 
-                updateJunctionRisk(turnA.lat, turnA.lng);
+                if (Math.abs(etaSelf - etaOther) <= 3.0) {
+                  const riskScore = getJunctionRiskScore(aLat, aLng);
+                  const severity = computeSeverity("turn", speedSelf, Math.min(etaSelf, etaOther), distSelfToTurn);
 
-                // FIX BUG #29: Include severity and riskScore in payload
-                const payloadSelf = {
-                  type: "turn_collision",
-                  id: other.userId ?? uid,
-                  lat: other.latitude,
-                  lng: other.longitude,
-                  intersectionLat: turnA.lat,
-                  intersectionLng: turnA.lng,
-                  severity,
-                  riskScore,
-                  eta: Math.min(etaSelf, etaOther),
-                  message: "⚠️ Collision risk at turn ahead",
-                };
+                  updateJunctionRisk(aLat, aLng);
 
-                threats.push(payloadSelf);
-                console.log("🚨 TURN COLLISION THREAT (SELF):", payloadSelf);
-
-                const wsOther = userSockets.get(uid);
-                if (wsOther && wsOther.readyState === wsOther.OPEN) {
-                  const payloadOther = {
+                  const payloadSelf = {
                     type: "turn_collision",
-                    id: data.userId,
-                    lat: data.latitude,
-                    lng: data.longitude,
-                    intersectionLat: turnA.lat,
-                    intersectionLng: turnA.lng,
+                    id: other.userId ?? uid,
+                    lat: other.latitude,
+                    lng: other.longitude,
+                    intersectionLat: aLat,
+                    intersectionLng: aLng,
                     severity,
                     riskScore,
                     eta: Math.min(etaSelf, etaOther),
                     message: "⚠️ Collision risk at turn ahead",
                   };
-                  wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
-                  console.log("📣 Sent TURN COLLISION to:", uid);
+
+                  threats.push(payloadSelf);
+                  console.log("🚨 TURN COLLISION THREAT (SELF):", payloadSelf);
+
+                  const wsOther = userSockets.get(uid);
+                  if (wsOther && wsOther.readyState === wsOther.OPEN) {
+                    const payloadOther = {
+                      type: "turn_collision",
+                      id: data.userId,
+                      lat: data.latitude,
+                      lng: data.longitude,
+                      intersectionLat: aLat,
+                      intersectionLng: aLng,
+                      severity,
+                      riskScore,
+                      eta: Math.min(etaSelf, etaOther),
+                      message: "⚠️ Collision risk at turn ahead",
+                    };
+                    wsOther.send(JSON.stringify({ status: "threat", data: payloadOther }));
+                    console.log("📣 Sent TURN COLLISION to:", uid);
+                  }
+                  matched = true;
+                  break;
                 }
               }
             }
