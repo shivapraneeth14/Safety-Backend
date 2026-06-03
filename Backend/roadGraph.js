@@ -39,15 +39,7 @@ class RoadGraph {
     console.log("🗺️ Loading road graph from MongoDB...");
 
     try {
-      // 22km radius covering Hayathnagar → Lingampally → Charminar → Malkajgiri
-      const EARTH_RADIUS_M = 6378100;
-      const roads = await Road.find({
-        geometry: {
-          $geoWithin: {
-            $centerSphere: [[78.49, 17.405], 22000 / EARTH_RADIUS_M]
-          }
-        }
-      }, {
+      const roads = await Road.find({}, {
         osmId: 1, highway: 1, name: 1, nodes: 1, geometry: 1,
         oneway: 1, maxspeed: 1, lanes: 1, ref: 1, width: 1, surface: 1, junction: 1,
         osmAgeDays: 1,
