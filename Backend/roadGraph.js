@@ -39,7 +39,21 @@ class RoadGraph {
     console.log("🗺️ Loading road graph from MongoDB...");
 
     try {
-      const roads = await Road.find({}, {
+      const HYDERABAD_REGION = {
+        $geoWithin: {
+          $geometry: {
+            type: "Polygon",
+            coordinates: [[
+              [78.554, 17.310],
+              [78.517, 17.458],
+              [78.339, 17.514],
+              [78.476, 17.344],
+              [78.554, 17.310],
+            ]]
+          }
+        }
+      };
+      const roads = await Road.find({ geometry: HYDERABAD_REGION }, {
         osmId: 1, highway: 1, name: 1, nodes: 1, geometry: 1,
         oneway: 1, maxspeed: 1, lanes: 1, ref: 1, width: 1, surface: 1, junction: 1,
         osmAgeDays: 1,
