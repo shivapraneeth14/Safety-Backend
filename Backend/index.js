@@ -184,11 +184,14 @@ async function initRedis() {
     redisClient = createClient({ url: process.env.REDIS_URL });
     redisClient.on("error", (err) => {
       console.error("❌ Redis Error:", err.message);
-      redisConnected = false;
     });
     redisClient.on("ready", () => {
       console.log("✅ Connected to Redis");
       redisConnected = true;
+    });
+    redisClient.on("reconnecting", () => {
+      console.log("🔄 Redis reconnecting...");
+      redisConnected = false;
     });
     redisClient.on("end", () => {
       console.warn("⚠️ Redis connection ended");
@@ -692,7 +695,6 @@ wss.on("connection", (ws, req) => {
           console.error("❌ Redis GEOADD failed:", e);
         }
 
-        // Persist full payload
         const ttl = data.speed > 5 ? 10 : 30;
         try {
           await redisClient.set(`userData:${data.userId}`, JSON.stringify(storePayload), { EX: ttl });
@@ -701,14 +703,7 @@ wss.on("connection", (ws, req) => {
           console.error("❌ Redis SET userData failed:", e);
         }
       } else {
-        // Without Redis, skip directly to empty response
-        console.warn("⚠️ Redis not connected, sending empty threats");
-        try {
-          ws.send(JSON.stringify({ status: "received", timestamp: new Date(), threats: [], serverTime: serverTimeMs, serverVersion: SERVER_VERSION, }));
-        } catch (e) {
-          console.error("❌ Failed to send response:", e);
-        }
-        return;
+        console.warn("⚠️ Redis not connected — skipping persistence, detection may be limited");
       }
 
       // FIX BUG #6: Gyro conversion - correctly convert ALL axes from rad/s to deg/s
@@ -1510,6 +1505,7 @@ wss.on("connection", (ws, req) => {
           timestamp: new Date(),
           serverTime: Date.now(),
           serverVersion: SERVER_VERSION,
+          redisConnected,
           timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
           threats,
           upcomingTurns,
