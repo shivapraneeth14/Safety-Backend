@@ -802,34 +802,6 @@ wss.on("connection", (ws, req) => {
       otherIds = nearbyUserIds.filter(uid => uid !== data.userId);
       console.log(`👥 otherIds (excluding self): ${otherIds.length}`, otherIds);
 
-      if (otherIds.length === 0) {
-        ws.send(JSON.stringify({
-          status: "received",
-          timestamp: new Date(),
-          serverTime: Date.now(),
-          serverVersion: SERVER_VERSION,
-          timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
-          threats: [],
-          mapMatch: {
-            matched: matched.matched,
-            confidence: matched.matchConfidence ?? 0,
-            roadId: matched.roadId,
-            snappedLat: matched.snappedLat,
-            snappedLng: matched.snappedLng,
-            distanceToRoad: matched.distanceToRoad ?? null,
-            vehicleStateConfidence: matched.vehicleStateConfidence ?? 0.5,
-          },
-          roadBubble: {
-            used: roadBubbleUsed,
-            rawCount: rawNearbyCount,
-            filteredCount: nearbyUserIds.length,
-            reduction: rawNearbyCount > 0 ? ((1 - nearbyUserIds.length / rawNearbyCount) * 100).toFixed(0) + "%" : "0%",
-          },
-        }));
-        console.log("📤 No neighbors -> returning empty threats");
-        return;
-      }
-
       const keys = otherIds.map(uid => `userData:${uid}`);
       try {
         usersData = await redisClient.mGet(keys);
