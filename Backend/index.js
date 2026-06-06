@@ -80,6 +80,10 @@ app.get("/api/nearby-roads", async (req, res) => {
       return res.status(400).json({ error: "Invalid lat/lon" });
     }
 
+    if (latNum < -90 || latNum > 90 || lonNum < -180 || lonNum > 180) {
+      return res.status(400).json({ error: "Lat/lon out of range" });
+    }
+
     const roads = await Road.find({
       geometry: {
         $near: {
@@ -583,6 +587,13 @@ wss.on("connection", (ws, req) => {
       if (typeof data.latitude !== "number" || typeof data.longitude !== "number") {
         console.log("⚠️ validation failed: invalid coordinates");
         ws.send(JSON.stringify({ status: "error", reason: "invalid coordinates" }));
+        return;
+      }
+
+      // Range validation — lat must be -90..90, lng -180..180
+      if (data.latitude < -90 || data.latitude > 90 || data.longitude < -180 || data.longitude > 180) {
+        console.log(`⚠️ validation failed: coordinates out of range: ${data.latitude}, ${data.longitude}`);
+        ws.send(JSON.stringify({ status: "error", reason: "coordinates out of range" }));
         return;
       }
 
