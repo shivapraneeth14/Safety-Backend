@@ -665,6 +665,49 @@ wss.on("connection", (ws, req) => {
         roadVehicleMap.get(matched.roadId).add(data.userId);
       }
 
+      // ─── When road changes, compute all junctions ahead ───
+      let roadJunctions = [];
+      if (matched.roadId && roadGraph && roadGraph.initialized && matched.matchConfidence >= 0.3) {
+        const isNewRoad = prevRoadId !== matched.roadId;
+        if (isNewRoad) {
+          try {
+            const reachable = roadGraph.getReachableRoads(
+              matched.roadId, 2000, vehicleSpeed, matched.roadHeading || data.heading || 0
+            );
+            const allRoadEntries = [{ rid: matched.roadId, hdg: matched.roadHeading || data.heading || 0 }];
+            for (const r of reachable) {
+              allRoadEntries.push({ rid: r.roadId, hdg: r.entryHeading });
+            }
+
+            const junctionMap = new Map();
+            for (const entry of allRoadEntries) {
+              const junctions = roadGraph.getJunctionsAhead(
+                entry.rid, matched.snappedLat, matched.snappedLng, entry.hdg, 2000
+              );
+              for (const j of junctions) {
+                const key = `${j.lat.toFixed(5)},${j.lng.toFixed(5)}`;
+                if (!junctionMap.has(key)) {
+                  junctionMap.set(key, {
+                    lat: j.lat,
+                    lng: j.lng,
+                    distance: Math.round(j.distance),
+                    type: j.turnType || j.junctionType || "unknown",
+                    dirs: j.dirs || [],
+                    riskLevel: j.riskLevel || 1,
+                    angle: j.angle || 0,
+                  });
+                }
+              }
+            }
+
+            roadJunctions = Array.from(junctionMap.values())
+              .sort((a, b) => a.distance - b.distance);
+          } catch (e) {
+            console.error("❌ Error computing road junctions:", e.message);
+          }
+        }
+      }
+
       // ─── Track last seen ───
       vehicleLastSeen.set(data.userId, serverTimeMs);
 
@@ -1564,6 +1607,7 @@ wss.on("connection", (ws, req) => {
             filteredCount: nearbyUserIds.length,
             reduction: rawNearbyCount > 0 ? ((1 - nearbyUserIds.length / rawNearbyCount) * 100).toFixed(0) + "%" : "0%",
           },
+          roadJunctions,
         }));
       } catch (e) {
         console.error("❌ Failed to send response to origin:", e);

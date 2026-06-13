@@ -25,6 +25,14 @@ function normalizeAngleDeg(a) {
   return ((a % 360) + 360) % 360;
 }
 
+function _classifyJunctionShape(dirs, totalConnected, maxAngleDiff) {
+  if (dirs.includes("straight") && dirs.length >= 2) return "cross";
+  if (dirs.length >= 2 && !dirs.includes("straight")) return "y_junction";
+  if (dirs.length === 0) return "straight";
+  if (dirs.length === 1) return "single";
+  return "complex";
+}
+
 class RoadGraph {
   constructor() {
     this.adjacency = new Map();
@@ -256,6 +264,36 @@ class RoadGraph {
       const connectedRoads = this.nodeToRoads.get(nodeId);
       if (connectedRoads && connectedRoads.size > 1) {
         const bearingToJunction = getBearing(lat, lng, clat, clon);
+
+        // Compute direction of each connecting road relative to approach
+        const dirs = [];
+        let maxAngleDiff = 0;
+        for (const otherId of connectedRoads) {
+          if (otherId === roadId) continue;
+          const otherBearing = this._getRoadEntryBearing(otherId, nodeId);
+          let diff = (otherBearing - bearingToJunction) % 360;
+          if (diff > 180) diff -= 360;
+          if (diff < -180) diff += 360;
+
+          if (Math.abs(diff) > Math.abs(maxAngleDiff)) maxAngleDiff = diff;
+
+          if (Math.abs(diff) <= 30) dirs.push("straight");
+          else if (diff > 30) dirs.push("right");
+          else if (diff < -30) dirs.push("left");
+        }
+
+        const absAngle = Math.abs(maxAngleDiff);
+        const dir = maxAngleDiff > 0 ? "right" : "left";
+        let turnType = _classifyJunctionShape(dirs, connectedRoads.size, maxAngleDiff);
+        if (turnType === "single") {
+          if (absAngle > 150) turnType = `hairpin_${dir}`;
+          else if (absAngle > 90) turnType = `sharp_${dir}`;
+          else if (absAngle > 30) turnType = `${dir}_turn`;
+          else turnType = `slight_${dir}`;
+        }
+
+        const riskLevel = absAngle < 15 ? 0 : absAngle < 30 ? 1 : absAngle < 60 ? 2 : absAngle < 90 ? 3 : absAngle < 150 ? 4 : 5;
+
         junctions.push({
           nodeId,
           lat: clat,
@@ -264,6 +302,10 @@ class RoadGraph {
           connectedRoads: Array.from(connectedRoads),
           approachBearing: bearingToJunction,
           junctionType: this._classifyJunction(connectedRoads, roadId, heading, clat, clon),
+          dirs,
+          angle: maxAngleDiff,
+          turnType,
+          riskLevel,
         });
       }
     }
