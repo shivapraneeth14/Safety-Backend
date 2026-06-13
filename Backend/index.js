@@ -865,6 +865,23 @@ wss.on("connection", (ws, req) => {
         }
       }
 
+      // Collect nearby vehicles for map display (reuses already-fetched data)
+      const nearbyVehicles = [];
+      for (let i = 0; i < otherIds.length; i++) {
+        const raw = usersData[i];
+        if (!raw) continue;
+        try {
+          const v = JSON.parse(raw);
+          nearbyVehicles.push({
+            id: v.userId ?? otherIds[i],
+            lat: v.latitude ?? v.lat,
+            lng: v.longitude ?? v.lng,
+            heading: v.heading ?? 0,
+            speed: v.speed ?? 0,
+          });
+        } catch {}
+      }
+
       // local helper functions
       const deg2rad = d => (d * Math.PI) / 180;
       const rad2deg = r => (r * 180) / Math.PI;
@@ -1519,6 +1536,7 @@ wss.on("connection", (ws, req) => {
           redisConnected,
           timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
           threats,
+          nearbyVehicles,
           upcomingTurns,
           currentRoadInfo: {
             speedLimit: selfRoad?.maxspeed || null,
