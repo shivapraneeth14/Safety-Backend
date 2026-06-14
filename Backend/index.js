@@ -188,6 +188,7 @@ async function initRedis() {
     redisClient = createClient({ url: process.env.REDIS_URL });
     redisClient.on("error", (err) => {
       console.error("❌ Redis Error:", err.message);
+      redisConnected = false;
     });
     redisClient.on("ready", () => {
       console.log("✅ Connected to Redis");
@@ -737,7 +738,7 @@ wss.on("connection", (ws, req) => {
       };
 
       // Persist geo to Redis (GEOADD)
-      if (redisConnected && redisClient) {
+      if (redisClient?.isReady) {
         try {
           await redisClient.geoAdd("users", {
             longitude: storePayload.longitude,
@@ -1571,12 +1572,12 @@ wss.on("connection", (ws, req) => {
       }
 
       try {
-        ws.send(JSON.stringify({
-           status: "received",
-          timestamp: new Date(),
-          serverTime: Date.now(),
-          serverVersion: SERVER_VERSION,
-          redisConnected,
+          ws.send(JSON.stringify({
+             status: "received",
+            timestamp: new Date(),
+            serverTime: Date.now(),
+            serverVersion: SERVER_VERSION,
+            redisConnected: redisClient?.isReady ?? false,
           timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
           threats,
           nearbyVehicles,
