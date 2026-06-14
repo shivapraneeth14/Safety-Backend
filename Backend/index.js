@@ -1572,12 +1572,14 @@ wss.on("connection", (ws, req) => {
       }
 
       try {
+        const responseRedisConnected = redisClient?.isReady ?? false;
+        console.log(`📤 Sending response with redisConnected=${responseRedisConnected}`);
           ws.send(JSON.stringify({
              status: "received",
             timestamp: new Date(),
             serverTime: Date.now(),
             serverVersion: SERVER_VERSION,
-            redisConnected: redisClient?.isReady ?? false,
+            redisConnected: responseRedisConnected,
           timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
           threats,
           nearbyVehicles,
