@@ -380,9 +380,9 @@ async function smoke05_timeSync(ws) {
 
   const latency = performance.now() - start;
 
-  failures.push(assert(offsetResp.serverTime != null, "serverTime present", typeof offsetResp.serverTime, "number"));
-  failures.push(assert(offsetConfidence < baselineConfidence, "confidence decreased with 1s offset", `${offsetConfidence.toFixed(3)} < ${baselineConfidence.toFixed(3)}`, true));
-  failures.push(assert(!isNaN(offsetResp.serverTime), "serverTime is valid number", offsetResp.serverTime, "valid"));
+  check(failures, offsetResp.serverTime != null, "serverTime present", typeof offsetResp.serverTime, "number");
+  check(failures, offsetConfidence < baselineConfidence, "confidence decreased with 1s offset", `${offsetConfidence.toFixed(3)} < ${baselineConfidence.toFixed(3)}`, true);
+  check(failures, !isNaN(offsetResp.serverTime), "serverTime is valid number", offsetResp.serverTime, "valid");
 
   return { passed: passed(failures), failures: onlyFailures(failures), latency, scenario: "Smoke-05", label: "Time Sync" };
 }

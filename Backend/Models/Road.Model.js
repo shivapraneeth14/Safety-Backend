@@ -16,6 +16,8 @@ const roadSchema = new mongoose.Schema({
   width: String,
   surface: String,
   junction: String,
+  // FIX ISSUE #8: osmAgeDays tracks how old the OSM data is for confidence calculation
+  osmAgeDays: { type: Number, default: 365 },
 });
 
 roadSchema.index({ geometry: "2dsphere" });

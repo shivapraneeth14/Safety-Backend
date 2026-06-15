@@ -5,6 +5,8 @@ class EtaRegistry extends EventEmitter {
     super();
     this.roadGraph = roadGraph;
     this.junctions = new Map();
+    // FIX ISSUE #12: road-indexed junction lookup for O(n) cross-junction checks
+    this.junctionsByRoad = new Map(); // roadId → Set<junctionKey>
     this.cleanupInterval = setInterval(() => this._cleanup(), 5000);
     this.pendingConflicts = [];
   }
@@ -53,6 +55,11 @@ class EtaRegistry extends EventEmitter {
           vehicles: new Map(),
           lastConflictCheck: now,
         });
+        // FIX ISSUE #12: register junction under its road for O(1) lookup
+        if (!this.junctionsByRoad.has(matched.roadId)) {
+          this.junctionsByRoad.set(matched.roadId, new Set());
+        }
+        this.junctionsByRoad.get(matched.roadId).add(key);
       }
 
       const entry = this.junctions.get(key);
@@ -84,15 +91,23 @@ class EtaRegistry extends EventEmitter {
     }
 
     // Cross-junction check: check vehicles at nearby junctions on the same road
+    // FIX ISSUE #12: O(n) not O(n²) via road-indexed lookup
     if (firstJunctionKey && matched.roadId) {
-      for (const [otherKey, otherEntry] of this.junctions) {
-        if (otherEntry.roadId !== matched.roadId) continue;
+      const sameRoadKeys = this.junctionsByRoad.get(matched.roadId) || new Set();
+      const [firstLatStr, firstLngStr] = firstJunctionKey.split(",");
+      const firstLatNum = parseFloat(firstLatStr);
+      const firstLngNum = parseFloat(firstLngStr);
+
+      for (const otherKey of sameRoadKeys) {
+        const otherEntry = this.junctions.get(otherKey);
+        if (!otherEntry) continue;
         if (now - (otherEntry.lastConflictCheck || 0) > 10000) continue;
 
-        // Also check nearby keys (within ~200m) even if different junction
+        // Check nearby keys (within ~200m)
+        const [oLatStr, oLngStr] = otherKey.split(",");
         const isNearby = otherKey === firstJunctionKey ||
-          (Math.abs(parseFloat(otherKey.split(",")[0]) - parseFloat(firstJunctionKey.split(",")[0])) < 0.002 &&
-           Math.abs(parseFloat(otherKey.split(",")[1]) - parseFloat(firstJunctionKey.split(",")[1])) < 0.002);
+          (Math.abs(parseFloat(oLatStr) - firstLatNum) < 0.002 &&
+           Math.abs(parseFloat(oLngStr) - firstLngNum) < 0.002);
 
         if (!isNearby) continue;
 

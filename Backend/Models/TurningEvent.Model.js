@@ -17,6 +17,8 @@ const turningEventSchema = new mongoose.Schema({
 
 turningEventSchema.index({ location: "2dsphere" });
 turningEventSchema.index({ timestamp: -1 });
+// FIX ISSUE #34: roadId indexed for faster junction queries
+turningEventSchema.index({ roadId: 1 });
 
 const TurningEvent = mongoose.model("TurningEvent", turningEventSchema);
 export default TurningEvent;

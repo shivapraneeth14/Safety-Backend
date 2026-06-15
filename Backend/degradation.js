@@ -41,17 +41,18 @@ function computePredictionUncertainty(params) {
   return Math.max(base, 1.0);
 }
 
-function computeCollisionRadius(baseRadius, uncertaintySelf, uncertaintyOther, timeHorizon) {
-  const uncertaintyRadius = uncertaintySelf + uncertaintyOther;
-  const timeScaledRadius = baseRadius + uncertaintyRadius;
-  return timeScaledRadius;
-}
+// FIX ISSUE #24: removed unused computeCollisionRadius — dead code
 
+// FIX ISSUE #18: exponential decay better calibrated than linear
+// Uses Gaussian-like falloff: exp(-d²/(2σ²)) where σ = combined/2
 function computeOverlapProbability(distanceMeters, uncertaintySelf, uncertaintyOther) {
+  if (distanceMeters <= 0) return 1.0;
   const combined = uncertaintySelf + uncertaintyOther;
-  if (combined <= 0) return distanceMeters <= 2.5 ? 1.0 : 0.0;
-  if (distanceMeters >= combined) return 0.0;
-  return 1.0 - (distanceMeters / combined);
+  if (combined <= 0) return 0.0;
+  if (distanceMeters >= combined * 2) return 0.0;
+  const sigma = combined / 2;
+  const exponent = -(distanceMeters * distanceMeters) / (2 * sigma * sigma);
+  return Math.exp(exponent);
 }
 
 function computeAlertConfidence(collisionProbability, matchConfidence, sensorQuality, roadConfidence, vehicleStateConfidence) {
@@ -93,7 +94,7 @@ function classifyAlert(confidence, mode = "balanced") {
 
 export {
   computePredictionUncertainty,
-  computeCollisionRadius,
+  // FIX ISSUE #24: removed computeCollisionRadius from exports
   computeOverlapProbability,
   computeAlertConfidence,
   classifyStaleness,

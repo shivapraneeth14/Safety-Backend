@@ -30,6 +30,24 @@ const verifyToken = (token, secret) => {
     }
 };
 
+// FIX ISSUE #27: JWT verification middleware for protected routes
+const verifyJWT = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    if (!token) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+    req.user = await User.findById(decoded._id).select("-password -refreshToken");
+    if (!req.user) {
+      return res.status(401).json({ message: "User not found" });
+    }
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
+};
+
 const register = async (req, res) => {
   const { username, email, password, phoneNumber, vehicleType } = req.body;
 
@@ -339,4 +357,4 @@ const logout = async (req, res) => {
 };
 
 
-export {register, Login, getuserprofile, logout, getCurrentUserProfile, refreshAccessToken, updateProfile, deleteAccount};
+export {register, Login, getuserprofile, logout, getCurrentUserProfile, refreshAccessToken, updateProfile, deleteAccount, verifyJWT};

@@ -1,0 +1,125 @@
+{
+  "timestamp": "2026-06-15T16:01:12.007Z",
+  "wsUrl": "ws://localhost:5001?token=dev-token",
+  "results": [
+    {
+      "scenario": "Smoke-01",
+      "label": "G-03 Parallel",
+      "passed": false,
+      "latencyMs": 977.9118330000001,
+      "failures": [
+        "FAIL: vehicle B matched (got=false, expected=true)"
+      ],
+      "mapMatchConfidence": 0,
+      "threatsCount": 0,
+      "serverTime": 1781539258781
+    },
+    {
+      "scenario": "Smoke-02",
+      "label": "G-04 Flyover",
+      "passed": true,
+      "latencyMs": 1139.1014169999999,
+      "failures": [],
+      "mapMatchConfidence": 0,
+      "threatsCount": 0,
+      "serverTime": 1781539259921
+    },
+    {
+      "scenario": "Smoke-03",
+      "label": "G-05 GPS Drift",
+      "passed": false,
+      "latencyMs": 807.948875,
+      "failures": [
+        "FAIL: match confidence >= 0.55 (got=0, expected=>=0.55)",
+        "FAIL: correction >= 3m (got=0.0, expected=>=3m)",
+        "FAIL: distToRoad < 5m (got=15.0, expected=<5m)"
+      ],
+      "mapMatchConfidence": 0,
+      "threatsCount": 0,
+      "serverTime": 1781539260729
+    },
+    {
+      "scenario": "Smoke-04",
+      "label": "RT-01 GPS Jump",
+      "passed": false,
+      "latencyMs": 5757.956125000001,
+      "failures": [
+        "FAIL: Phase2: confidence never < 0.30 (got=0, expected=>=0.30)",
+        "FAIL: Phase2: drift < 10m (got=50.2, expected=<10m)",
+        "FAIL: Phase3: recovery confidence >= 0.70 (got=0, expected=>=0.70)"
+      ],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-05",
+      "label": "Time Sync",
+      "passed": true,
+      "latencyMs": 1652.83475,
+      "failures": [],
+      "mapMatchConfidence": null,
+      "threatsCount": 0,
+      "serverTime": null
+    },
+    {
+      "scenario": "Smoke-06",
+      "label": "Road Bubble",
+      "passed": false,
+      "latencyMs": 541.4682089999988,
+      "failures": [
+        "FAIL: road bubble used (got=false, expected=true)"
+      ],
+      "mapMatchConfidence": 0,
+      "threatsCount": 0,
+      "serverTime": 1781539268682
+    },
+    {
+      "scenario": "Smoke-07",
+      "label": "ETA Conflict",
+      "passed": true,
+      "latencyMs": 1216.255416,
+      "failures": [],
+      "mapMatchConfidence": 0.9004968725483895,
+      "threatsCount": 1,
+      "serverTime": 1781539269899
+    },
+    {
+      "scenario": "Smoke-08",
+      "label": "Road Curve",
+      "passed": true,
+      "latencyMs": 224.22091600000022,
+      "failures": [],
+      "mapMatchConfidence": 0.8244968725483897,
+      "threatsCount": 2,
+      "serverTime": 1781539270123
+    },
+    {
+      "scenario": "Smoke-09",
+      "label": "Uncertainty Growth",
+      "passed": true,
+      "latencyMs": 469.28629100000035,
+      "failures": [],
+      "mapMatchConfidence": 0,
+      "threatsCount": 0,
+      "serverTime": 1781539270592
+    },
+    {
+      "scenario": "Smoke-10",
+      "label": "Probability Overlap",
+      "passed": true,
+      "latencyMs": 1410.795709,
+      "failures": [],
+      "mapMatchConfidence": 0.6151572113561148,
+      "threatsCount": 0,
+      "serverTime": 1781539272003
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 4,
+    "avgLatencyMs": 1419.7779541,
+    "worstLatencyMs": 5757.956125000001,
+    "mapMatchPassRate": "25"
+  }
+}

@@ -19,6 +19,13 @@ import EtaRegistry from "./etaRegistry.js";
 import { computePredictionUncertainty, computeOverlapProbability, classifyStaleness, classifyAlert, computeAlertConfidence } from "./degradation.js";
 
 dotenv.config();
+
+// FIX ISSUE #26: block DEV_MODE in production
+if (process.env.NODE_ENV === "production" && process.env.DEV_MODE === "true") {
+  console.warn("⚠️  DEV_MODE blocked in production — forcing DEV_MODE=false");
+  process.env.DEV_MODE = "false";
+}
+
 const app = express();
 
 app.use(
@@ -130,9 +137,6 @@ const nearbyCache = new Map();
 const NEARBY_CACHE_TTL_MS = 2000;
 const NEARBY_CACHE_MOVE_THRESHOLD_M = 10;
 
-// One-way road cache (userId => last known oneway context)
-const onewayCache = new Map();
-
 // Sprint 1: Road graph, map matcher, ETA registry
 let roadGraph = null;
 let mapMatcher = null;
@@ -158,10 +162,12 @@ function getJunctionKey(lat, lng) {
   return `${lat.toFixed(4)},${lng.toFixed(4)}`;
 }
 
+// FIX ISSUE #10: LRU eviction prevents unbounded memory growth
 function updateJunctionRisk(lat, lng) {
   const key = getJunctionKey(lat, lng);
-  const entry = junctionRisk.get(key) || { nearMisses: 0, brakeEvents: 0, totalThreats: 0 };
+  const entry = junctionRisk.get(key) || { nearMisses: 0, brakeEvents: 0, totalThreats: 0, timestamp: Date.now() };
   entry.totalThreats++;
+  entry.timestamp = Date.now();
   junctionRisk.set(key, entry);
 }
 
@@ -274,12 +280,13 @@ function getStaleTimeout(speedMs) {
 
 const SERVER_VERSION = "sprint4";
 
-function deterministicThreatId(type, roadId, otherId, timeHorizon) {
-  const raw = `${type}|${roadId || "none"}|${otherId || "none"}|${Math.floor(timeHorizon || 0)}`;
+// FIX ISSUE #22: threatId unique per recipient vehicle
+function deterministicThreatId(type, roadId, otherId, timeHorizon, recipientId) {
+  const raw = `${type}|${roadId || "none"}|${otherId || "none"}|${Math.floor(timeHorizon || 0)}|${recipientId || "self"}`;
   return createHash("sha256").update(raw).digest("hex").substring(0, 12);
 }
 
-function computeSeverity(type, speedMs, ttc, distToTurn) {
+function computeSeverity(type, speedMs, ttc, distToTurn, clientHour) {
   // FIX BUG #29: Severity scoring 1-3
   let base = 1;
   const speedKmh = speedMs * 3.6;
@@ -289,14 +296,15 @@ function computeSeverity(type, speedMs, ttc, distToTurn) {
   if (speedKmh > 80) base += 1;
 
   // TTC modifier
-  if (ttc !== undefined && ttc < 2) base += 1;
+  // FIX ISSUE #3: null coerces to 0 in arithmetic, != null catches both null and undefined
+  if (ttc != null && ttc < 2) base += 1;
 
   // Turn modifier: closer to turn = more urgent
   if (distToTurn !== undefined && distToTurn < 20) base += 1;
 
   // Time of day: night (10PM-6AM) is higher risk
-  const hour = new Date().getHours();
-  if (hour < 6 || hour >= 22) base += 1;
+  // FIX ISSUE #21: uses rider local time not server UTC time
+  if (clientHour !== undefined && (clientHour < 6 || clientHour >= 22)) base += 1;
 
   return Math.min(3, base);
 }
@@ -466,6 +474,13 @@ async function getUpcomingTurns(lat, lng, heading, speedMs) {
 // In-memory cache of nearby vehicles for turn queries
 const nearbyVehicleCache = new Map();
 
+// FIX ISSUE #11: module-level speedHistory instead of global
+const speedHistory = new Map();
+
+// FIX ISSUE #28: debounce TurningEvent creation — max 1 per 10 seconds per user
+const turningEventDebounce = new Map();
+const TURNING_COOLDOWN_MS = 10000;
+
 // Clean stale entries from nearbyVehicleCache every 30s
 setInterval(() => {
   const cutoff = Date.now() - 10000;
@@ -473,6 +488,20 @@ setInterval(() => {
     if (val.timestamp < cutoff) nearbyVehicleCache.delete(key);
   }
 }, 30000);
+
+// FIX ISSUE #10: LRU cleanup for junctionRisk — run hourly, cap at 10000 entries
+setInterval(() => {
+  const cutoff = Date.now() - 86400000; // 24h
+  for (const [k, v] of junctionRisk) {
+    if (v.timestamp < cutoff) {
+      junctionRisk.delete(k);
+    }
+  }
+  if (junctionRisk.size > 10000) {
+    const keys = [...junctionRisk.keys()];
+    keys.slice(0, Math.min(1000, keys.length)).forEach(k => junctionRisk.delete(k));
+  }
+}, 3600000);
 
 // Track last heading for turn learning
 const lastHeadingMap = new Map();
@@ -609,22 +638,24 @@ wss.on("connection", (ws, req) => {
       const vehicleType = data.vehicleType || "two-wheeler";
       const isTwoWheeler = vehicleType === "two-wheeler";
 
-      // ─── Sprint 1: Time Sync ───
+      // ─── Sprint 1: Time Sync (One-directional) ───
+      // FIX ISSUE #2: one-directional time sync eliminates cycle
+      // Frontend sends raw clientTime, backend computes offset, returns timeSyncOffset
       const clientTimeMs = typeof data.clientTime === "number" ? data.clientTime : Date.now();
       const serverTimeMs = Date.now();
-      const rttEstimate = data.serverTime ? (serverTimeMs - clientTimeMs) : 0;
-      const timeOffset = data.serverTime ? Math.floor((serverTimeMs - clientTimeMs) / 2) : 0;
+
+      // No longer reads data.serverTime from frontend — removes cycle
+      const timeOffset = serverTimeMs - clientTimeMs;
+      const rttEstimate = 0; // No longer computed from frontend serverTime
 
       let timeSyncEntry = timeSyncMap.get(data.userId) || { offsets: [], confidence: 1.0 };
-      if (data.serverTime) {
-        timeSyncEntry.offsets.push(timeOffset);
-        if (timeSyncEntry.offsets.length > 20) timeSyncEntry.offsets.shift();
-        const meanOffset = timeSyncEntry.offsets.reduce((a, b) => a + b, 0) / timeSyncEntry.offsets.length;
-        const variance = timeSyncEntry.offsets.reduce((a, b) => a + (b - meanOffset) ** 2, 0) / timeSyncEntry.offsets.length;
-        const stdDev = Math.sqrt(variance);
-        timeSyncEntry.confidence = Math.max(0.1, Math.min(1.0, 1.0 - stdDev / 500));
-        timeSyncEntry.offset = meanOffset;
-      }
+      timeSyncEntry.offsets.push(timeOffset);
+      if (timeSyncEntry.offsets.length > 20) timeSyncEntry.offsets.shift();
+      const meanOffset = timeSyncEntry.offsets.reduce((a, b) => a + b, 0) / timeSyncEntry.offsets.length;
+      const variance = timeSyncEntry.offsets.reduce((a, b) => a + (b - meanOffset) ** 2, 0) / timeSyncEntry.offsets.length;
+      const stdDev = Math.sqrt(variance);
+      timeSyncEntry.confidence = Math.max(0.1, Math.min(1.0, 1.0 - stdDev / 500));
+      timeSyncEntry.offset = meanOffset;
       timeSyncMap.set(data.userId, timeSyncEntry);
 
       // ─── Sprint 1: Map Matching ───
@@ -955,6 +986,16 @@ wss.on("connection", (ws, req) => {
       const posSelf = { x: 0, y: 0 };
       console.log(`🚗 Self id=${data.userId} lat=${baseLat} lon=${baseLon} speed=${speedSelf} heading=${headingSelf}`);
 
+      // FIX ISSUE #21: Compute client local hour once for all severity calls
+      let clientHour;
+      const dataTs = data.timestamp;
+      if (dataTs) {
+        const d = new Date(dataTs);
+        const match = String(dataTs).match(/([+-]\d{2}):\d{2}$/);
+        const offsetH = match ? parseInt(match[1], 10) : 5;
+        clientHour = (d.getUTCHours() + offsetH + 24) % 24;
+      }
+
       const now = Date.now();
       const threats = [];
 
@@ -1003,12 +1044,11 @@ wss.on("connection", (ws, req) => {
       const LOOKAHEAD_S = 8;
       const PREDICT_STEP = 0.5;
 
-      // maintain short in-memory speed history for self
-      if (!global.speedHistory) global.speedHistory = {};
-      if (!global.speedHistory[data.userId]) global.speedHistory[data.userId] = [];
-      // FIX BUG #33: Cap at 10 samples
-      global.speedHistory[data.userId].push({ speed: speedSelf, t: now });
-      global.speedHistory[data.userId] = global.speedHistory[data.userId].slice(-10);
+      // FIX ISSUE #11: maintain short in-memory speed history (module-level Map)
+      if (!speedHistory.has(data.userId)) speedHistory.set(data.userId, []);
+      const hist = speedHistory.get(data.userId);
+      hist.push({ speed: speedSelf, t: now });
+      speedHistory.set(data.userId, hist.slice(-10));
 
       function predictTrajectory(lat, lng, roadId, heading, speed, confidence, horizonSeconds) {
         // Road-constrained trajectory if we have a road match
@@ -1102,7 +1142,10 @@ wss.on("connection", (ws, req) => {
         // FIX: Multi-turn support — check all turns[] in payload
         // ----------------------------------------------------
         try {
-          const selfHasTurn = data.turnAhead === true || (Array.isArray(data.turns) && data.turns.length > 0);
+          // FIX ISSUE #6: uses backend roadJunctions when frontend has no turn data
+          const selfHasTurn = data.turnAhead === true ||
+            (Array.isArray(data.turns) && data.turns.length > 0) ||
+            (Array.isArray(roadJunctions) && roadJunctions.length > 0);
           const otherHasTurn = other.turnAhead === true || (Array.isArray(other.turns) && other.turns.length > 0);
 
           const selfTurns = data.turns && Array.isArray(data.turns) ? data.turns : [];
@@ -1135,7 +1178,9 @@ wss.on("connection", (ws, req) => {
                 if (bLat == null || bLng == null) continue;
 
                 const turnDist = haversineMeters(aLat, aLng, bLat, bLng);
-                if (turnDist > 8) continue;
+                // FIX ISSUE #13: dynamic 15-20m threshold accounts for GPS drift
+                const turnThreshold = 15 + Math.min(5, (matched?.matchConfidence ?? 0) * 10);
+                if (turnDist > turnThreshold) continue;
 
                 const distSelfToTurn = haversineMeters(baseLat, baseLon, aLat, aLng);
                 const distOtherToTurn = haversineMeters(other.latitude, other.longitude, aLat, aLng);
@@ -1149,7 +1194,7 @@ wss.on("connection", (ws, req) => {
 
                 if (Math.abs(etaSelf - etaOther) <= 3.0) {
                   const riskScore = getJunctionRiskScore(aLat, aLng);
-                  const severity = computeSeverity("turn", speedSelf, Math.min(etaSelf, etaOther), distSelfToTurn);
+                  const severity = computeSeverity("turn", speedSelf, Math.min(etaSelf, etaOther), distSelfToTurn, clientHour);
 
                   updateJunctionRisk(aLat, aLng);
 
@@ -1226,14 +1271,15 @@ wss.on("connection", (ws, req) => {
             const t = sp.t || (idx + 1) * 0.5;
             const dPred = haversineMeters(sp.lat, sp.lng, op.lat, op.lng);
 
+            // FIX ISSUE #1: self uncertainty now uses SELF vehicle data not other's
             const selfUncertainty = computePredictionUncertainty({
               timeHorizon: t,
               speedMs: speedSelf,
-              sensorQuality: other.sensorQuality ?? 0.8,
-              mapMatchConfidence: other.matchConfidence ?? 0,
-              roadConfidence: other.roadConfidence ?? 0.5,
-              networkRttMs: 0,
-              positionUncertainty: other.positionUncertainty ?? 10,
+              sensorQuality: data.sensorQuality ?? 0.8,
+              mapMatchConfidence: matched?.matchConfidence ?? 0,
+              roadConfidence: matched?.roadConfidence ?? 0.5,
+              networkRttMs: rttEstimate ?? 0,
+              positionUncertainty: data.positionUncertainty ?? 10,
               timeSinceLastUpdateMs: 0,
             });
 
@@ -1331,7 +1377,8 @@ wss.on("connection", (ws, req) => {
 
           // 2) Rear-end detection
           // FIX BUG #9: Use median of last 5 speed samples, require 3 consecutive
-          const otherHist = global.speedHistory[other.userId] ?? [];
+          // FIX ISSUE #11: use module-level speedHistory Map
+          const otherHist = speedHistory.get(other.userId) ?? [];
           if (otherHist.length >= 3) {
             // Use rolling window of last 5 samples
             const window = otherHist.slice(-5);
@@ -1356,8 +1403,16 @@ wss.on("connection", (ws, req) => {
 
             console.log(`🛑 Rear-check ${uid}: medianDecel=${medianDecel.toFixed(2)}m/s² aboveThreshold=${aboveThreshold}/${decels.length} closingSpeed=${closingSpeed.toFixed(2)}m/s relativeDist=${relativeDist.toFixed(2)}m thresholdDist=${rearEndDist.toFixed(1)}m`);
 
+            // FIX ISSUE #14: skip rear-end alert for vehicles moving apart
+            const sameDirection = hdiff < 45;
+            const vehiclesMovingApart = sameDirection && (speedSelf - speedOther) <= 0;
+            if (vehiclesMovingApart) {
+              console.log(`⏭️ Skipping rear-end: ${uid} moving apart (closingSpeed=${(speedSelf - speedOther).toFixed(2)}m/s)`);
+              continue;
+            }
+
             if (medianDecel >= SUDDEN_DECEL && aboveThreshold >= 3 && relativeDist <= rearEndDist && closingSpeed > 0.5) {
-              const severity = computeSeverity("rear_end", speedOther, null, relativeDist);
+              const severity = computeSeverity("rear_end", speedOther, null, relativeDist, clientHour);
 
               const payloadSelf = {
                 type: "rear_end",
@@ -1429,7 +1484,7 @@ wss.on("connection", (ws, req) => {
             const wrongDirRange = getSpeedBasedRadius(speedOther);
 
             if (headingDifferenceFromMajority >= WRONG_DIR_DIFF && distNow <= wrongDirRange) {
-              const severity = computeSeverity("wrong_direction", speedOther, null, distNow);
+              const severity = computeSeverity("wrong_direction", speedOther, null, distNow, clientHour);
 
               const payloadSelf = {
                 type: "wrong_direction",
@@ -1504,8 +1559,14 @@ wss.on("connection", (ws, req) => {
       if (prevHeading !== undefined && Date.now() - prevTime <= 3000) {
         const headingChange = Math.abs(headingSelf - prevHeading);
         if (headingChange > 20 && speedSelf > 1.38) {
-          // Record turning event for auto-learning (fire-and-forget)
-          TurningEvent.create({
+          // FIX ISSUE #28: debounce TurningEvent — max 1 per 10s per user
+          const lastTurningEvent = turningEventDebounce.get(data.userId) || 0;
+          if (Date.now() - lastTurningEvent < TURNING_COOLDOWN_MS) {
+            // Skip — too soon since last event
+          } else {
+            turningEventDebounce.set(data.userId, Date.now());
+            // Record turning event for auto-learning (fire-and-forget)
+            TurningEvent.create({
             userId: data.userId,
             location: {
               type: "Point",
@@ -1553,8 +1614,9 @@ wss.on("connection", (ws, req) => {
               }).catch(() => {});
             }
           }).catch(() => {});
-        }
-      }
+          } // end else block (debounce skip)
+        } // end if headingChange > 20
+      } // end if prevHeading !== undefined
       lastHeadingMap.set(data.userId, headingSelf);
       lastHeadingTimeMap.set(data.userId, Date.now());
 
@@ -1567,7 +1629,8 @@ wss.on("connection", (ws, req) => {
 
       for (const t of threats) {
         if (!t.threatId) {
-          t.threatId = deterministicThreatId(t.type, matched.roadId, t.id, t.time_s || t.eta || 0);
+          // FIX ISSUE #22: include recipientId for unique per-vehicle threatId
+          t.threatId = deterministicThreatId(t.type, matched.roadId, t.id, t.time_s || t.eta || 0, data.userId);
         }
       }
 
@@ -1581,6 +1644,8 @@ wss.on("connection", (ws, req) => {
             serverVersion: SERVER_VERSION,
             redisConnected: responseRedisConnected,
           timeSyncConfidence: timeSyncEntry?.confidence ?? 1.0,
+          // FIX ISSUE #2: return computed offset for one-directional sync
+          timeSyncOffset: timeSyncEntry?.offset ?? 0,
           threats,
           nearbyVehicles,
           upcomingTurns,
@@ -1625,14 +1690,17 @@ wss.on("connection", (ws, req) => {
   });
 
   // FIX BUG #16: O(1) socket close cleanup via reverse map
+  // FIX ISSUE #7/#11/#28: Clean up per-user caches on disconnect
   ws.on("close", () => {
     const uid = socketToUser.get(ws);
     if (uid) {
       userSockets.delete(uid);
       socketToUser.delete(ws);
-      // Clean up cached data for this user
       nearbyCache.delete(uid);
       wsMessageTimestamps.delete(uid);
+      speedHistory.delete(uid);
+      turningEventDebounce.delete(uid);
+      if (mapMatcher) mapMatcher.removeUser(uid);
       console.log(`🔌 Removed socket mapping for ${uid}`);
     }
     console.log("❌ WebSocket client disconnected");

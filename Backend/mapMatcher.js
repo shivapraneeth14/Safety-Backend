@@ -3,6 +3,10 @@ import Road from "./Models/Road.Model.js";
 const MAX_MATCH_DISTANCE_M = 50;
 const MAX_MATCH_WITH_UNCERTAINTY_M = 80;
 
+// FIX ISSUE #7: per-user road cache to reduce MongoDB queries
+// Key: userId, Value: { roads, lat, lng, timestamp }
+const roadCache = new Map();
+
 function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371e3;
   const toRad = (d) => (d * Math.PI) / 180;
@@ -54,33 +58,54 @@ class MapMatcher {
       }
     }
 
-    // Fast spatial query using MongoDB 2dsphere index
-    const nearbyRoads = await Road.find({
-      geometry: {
-        $near: {
-          $geometry: { type: "Point", coordinates: [effectiveLng, effectiveLat] },
-          $maxDistance: effectiveRadius,
-        },
-      },
-    }).limit(15).maxTimeMS(5000).lean();
+    // FIX ISSUE #7: Cache nearby roads per user to reduce MongoDB queries
+    const cache = roadCache.get(userId);
+    const speedMs = speed || 0;
+    const cacheAge = cache ? Date.now() - cache.timestamp : 999999;
+    const cacheDist = cache ? haversineMeters(effectiveLat, effectiveLng, cache.lat, cache.lng) : 999;
+    // TTL inversely proportional to speed: 5s slow, 2s fast
+    const cacheTtl = speedMs < 5 ? 5000 : speedMs < 15 ? 3000 : 2000;
 
-    if (!nearbyRoads || nearbyRoads.length === 0) {
+    let candidates;
+    if (cache && cacheAge < cacheTtl && cacheDist < 30) {
+      candidates = cache.roads;
+      console.log(`🗺️ Using cached roads for ${userId} (age=${cacheAge}ms, dist=${cacheDist.toFixed(0)}m)`);
+    } else {
+      // Fast spatial query using MongoDB 2dsphere index
+      const nearbyRoads = await Road.find({
+        geometry: {
+          $near: {
+            $geometry: { type: "Point", coordinates: [effectiveLng, effectiveLat] },
+            $maxDistance: effectiveRadius,
+          },
+        },
+      }).limit(15).maxTimeMS(5000).lean();
+      candidates = nearbyRoads;
+      roadCache.set(userId, {
+        roads: candidates,
+        lat: effectiveLat,
+        lng: effectiveLng,
+        timestamp: Date.now(),
+      });
+    }
+
+    if (!candidates || candidates.length === 0) {
       return this._noMatch(userId, effectiveLat, effectiveLng, heading, speed, positionUncertainty, prevState);
     }
 
-    const candidates = [];
-    for (const road of nearbyRoads) {
+    const scored = [];
+    for (const road of candidates) {
       const score = this._scoreCandidate(road, effectiveLat, effectiveLng, heading, speed, prevState, positionUncertainty);
       const projected = this.roadGraph.projectToRoad(effectiveLat, effectiveLng, road.osmId);
-      candidates.push({
+      scored.push({
         road,
         score,
         projected,
       });
     }
 
-    candidates.sort((a, b) => b.score - a.score);
-    const best = candidates[0];
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
 
     if (!best || best.score < 0.25) {
       return this._noMatch(userId, lat, lng, heading, speed, positionUncertainty, prevState);
@@ -211,6 +236,12 @@ class MapMatcher {
       c += 0.1;
     }
     return Math.max(0.1, Math.min(1.0, c));
+  }
+
+  // FIX ISSUE #7: cleanup on user disconnect
+  removeUser(userId) {
+    this.vehicleState.delete(userId);
+    roadCache.delete(userId);
   }
 
   getStaleness(lastTimestamp) {

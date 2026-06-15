@@ -5,6 +5,34 @@ import osmPbf from "osm-pbf-parser";
 import Road from "../Models/Road.Model.js";
 import Turn from "../Models/Turn.Model.js";
 
+// FIX ISSUE #33: memory monitoring for OOM prevention
+const MEMORY_WARN_MB = 3000;
+const MEMORY_CRITICAL_MB = 4000;
+const MEMORY_CHECK_INTERVAL = 5000; // ms
+let lastMemCheck = 0;
+
+function checkMemory(phase) {
+  const now = Date.now();
+  if (now - lastMemCheck < MEMORY_CHECK_INTERVAL) return;
+  lastMemCheck = now;
+  const usage = process.memoryUsage();
+  const rssMB = Math.round(usage.rss / 1024 / 1024);
+  const heapMB = Math.round(usage.heapUsed / 1024 / 1024);
+  if (rssMB > MEMORY_CRITICAL_MB) {
+    console.error(`\n❌ CRITICAL: RSS ${rssMB}MB exceeds ${MEMORY_CRITICAL_MB}MB limit.`);
+    console.error("   This dataset requires more memory than available.");
+    console.error("   Try splitting the PBF file with `osmium extract` or increase system memory.");
+    process.exit(1);
+  }
+  if (rssMB > MEMORY_WARN_MB) {
+    console.warn(`⚠️  WARNING: RSS ${rssMB}MB (heap ${heapMB}MB) at ${phase} — approaching limit`);
+    if (global.gc) {
+      global.gc();
+      console.warn("   Garbage collection triggered");
+    }
+  }
+}
+
 dotenv.config();
 
 const OSM_PBF_PATH = process.argv[2] || "data/southern-zone-latest.osm.pbf";
@@ -110,6 +138,7 @@ async function importRoads() {
     createReadStream(OSM_PBF_PATH)
       .pipe(osmPbf())
       .on("data", (items) => {
+        checkMemory("parse");
         for (const item of items) {
           if (item.type === "node") {
             nodeLocations.set(item.id, { lat: item.lat, lon: item.lon });
@@ -164,6 +193,7 @@ async function importRoads() {
   if (nodeCount > MAX_NODES_IN_MEMORY) {
     console.warn(`Warning: ${nodeCount} nodes may exceed memory. For very large PBF files, use a regional extract.`);
   }
+  checkMemory("post-parse");
   console.log(`Parsed ${nodeCount} nodes, ${wayCount} roads`);
 
   if (ways.length === 0) {
@@ -179,6 +209,7 @@ async function importRoads() {
   const wayIndex = new Map(ways.map(w => [w.osmId, w]));
 
   for (const way of ways) {
+    checkMemory("turns");
     for (let i = 0; i < way.nodes.length; i++) {
       const nodeId = way.nodes[i];
       if (processedNodes.has(nodeId)) continue;
@@ -387,6 +418,20 @@ async function importRoads() {
 
   if (turns.length > 0) {
     console.log("Importing turns to MongoDB...");
+    // FIX ISSUE #35: enum validated before insertMany bypasses Mongoose schema validation
+    const validTypes = new Set([
+      't_junction', 'cross', 'y_junction', 'offset_junction',
+      'roundabout', 'mini_roundabout', 'slip_road',
+      'left', 'right', 'sharp_left', 'sharp_right',
+      'hairpin_left', 'hairpin_right',
+      'slight_left', 'slight_right',
+      'gentle_curve_left', 'gentle_curve_right',
+      's_curve', 'reverse_s_curve',
+      'blind_crest', 'dip', 'narrow_section',
+      'dead_end', 'complex', 'straight', 'slight_curve',
+      'moderate_turn', 'very_sharp_turn', 'bend',
+    ]);
+    turns = turns.filter(t => validTypes.has(t.type));
     for (let i = 0; i < turns.length; i += BATCH_SIZE) {
       const batch = turns.slice(i, i + BATCH_SIZE);
       await Turn.insertMany(batch);

@@ -81,6 +81,7 @@ async function main() {
   const metrics = new MetricsCollector();
   const results = [];
   const scaleResults = [];
+  const scaleTestResults = []; // FIX ISSUE #32: separate array to avoid mutation during iteration
 
   for (const scenario of scenarios) {
     if (scenario.group === "D") {
@@ -129,7 +130,7 @@ async function main() {
         result.scenarioId = scenario.id;
         result.name = scenario.name;
         result.group = scenario.group;
-        scaleResults.push(result);
+        scaleTestResults.push(result);
         process.stdout.write(result.passed ? "PASS\n" : "FAIL\n");
       } catch (e) {
         process.stdout.write(`ERROR: ${e.message}\n`);
