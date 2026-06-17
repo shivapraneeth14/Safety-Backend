@@ -270,16 +270,18 @@ class RoadGraph {
         let maxAngleDiff = 0;
         for (const otherId of connectedRoads) {
           if (otherId === roadId) continue;
-          const otherBearing = this._getRoadEntryBearing(otherId, nodeId);
-          let diff = (otherBearing - bearingToJunction) % 360;
-          if (diff > 180) diff -= 360;
-          if (diff < -180) diff += 360;
+          const otherBearings = this._getAllRoadEntryBearings(otherId, nodeId);
+          for (const otherBearing of otherBearings) {
+            let diff = (otherBearing - bearingToJunction) % 360;
+            if (diff > 180) diff -= 360;
+            if (diff < -180) diff += 360;
 
-          if (Math.abs(diff) > Math.abs(maxAngleDiff)) maxAngleDiff = diff;
+            if (Math.abs(diff) > Math.abs(maxAngleDiff)) maxAngleDiff = diff;
 
-          if (Math.abs(diff) <= 30) dirs.push("straight");
-          else if (diff > 30) dirs.push("right");
-          else if (diff < -30) dirs.push("left");
+            if (Math.abs(diff) <= 30) dirs.push("straight");
+            else if (diff > 30) dirs.push("right");
+            else if (diff < -30) dirs.push("left");
+          }
         }
 
         const absAngle = Math.abs(maxAngleDiff);
@@ -535,6 +537,17 @@ class RoadGraph {
       if (s.endNode === entryNodeId) return normalizeAngleDeg(s.bearing + 180);
     }
     return segments[0]?.bearing || 0;
+  }
+
+  _getAllRoadEntryBearings(roadId, entryNodeId) {
+    const bearings = [];
+    const segments = this.roadSegments.get(roadId);
+    if (!segments) return bearings;
+    for (const s of segments) {
+      if (s.startNode === entryNodeId) bearings.push(s.bearing);
+      if (s.endNode === entryNodeId) bearings.push(normalizeAngleDeg(s.bearing + 180));
+    }
+    return bearings;
   }
 
   _getExitNodeId(roadId, entryHeading) {

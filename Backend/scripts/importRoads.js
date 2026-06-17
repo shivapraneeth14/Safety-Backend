@@ -233,19 +233,34 @@ async function importRoads() {
         const idx = w.nodes.indexOf(nodeId);
         if (idx < 0) continue;
 
-        // Get the adjacent node to determine direction
-        let adjIdx = idx + 1 < w.nodes.length ? idx + 1 : idx - 1;
-        if (adjIdx < 0 || adjIdx >= w.nodes.length) continue;
-        const adjNodeId = w.nodes[adjIdx];
-        const adjLoc = nodeLocations.get(adjNodeId);
-        if (!adjLoc) continue;
+        // Bearing toward the next node (forward direction)
+        if (idx + 1 < w.nodes.length) {
+          const adjNodeId = w.nodes[idx + 1];
+          const adjLoc = nodeLocations.get(adjNodeId);
+          if (adjLoc) {
+            const brg = bearing(nodeLoc.lat, nodeLoc.lon, adjLoc.lat, adjLoc.lon);
+            approachVectors.push({
+              heading: brg,
+              roadId: wayId,
+              roadName: w.name,
+            });
+          }
+        }
 
-        const brg = bearing(nodeLoc.lat, nodeLoc.lon, adjLoc.lat, adjLoc.lon);
-        approachVectors.push({
-          heading: brg,
-          roadId: wayId,
-          roadName: w.name,
-        });
+        // Bearing toward the previous node (backward direction)
+        // Captures the opposite side when this way passes through the junction node
+        if (idx - 1 >= 0) {
+          const adjNodeId = w.nodes[idx - 1];
+          const adjLoc = nodeLocations.get(adjNodeId);
+          if (adjLoc) {
+            const brg = bearing(nodeLoc.lat, nodeLoc.lon, adjLoc.lat, adjLoc.lon);
+            approachVectors.push({
+              heading: brg,
+              roadId: wayId,
+              roadName: w.name,
+            });
+          }
+        }
       }
 
       // Calculate max angle between any pair of approaches
@@ -257,7 +272,7 @@ async function importRoads() {
       }
 
       // Detailed turn classification
-      const numRoads = sharedWays.length;
+      const numRoads = approachVectors.length > 1 ? approachVectors.length : sharedWays.length;
       turnType = getTurnTypeByRoadCountAndAngle(numRoads, maxAngle);
 
       // Check for roundabout
