@@ -131,6 +131,10 @@ const userSockets = new Map();
 // Reverse map socket => userId for O(1) close cleanup
 const socketToUser = new Map();
 
+// Stationary vehicle tracker: userId → timestamp when speed dropped below 0.5
+const stationaryStart = new Map();
+const STATIONARY_THRESHOLD_S = 20;
+
 // Nearby user cache to reduce Redis queries
 // Key: userId, Value: { nearbyIds, timestamp, lat, lng }
 const nearbyCache = new Map();
@@ -986,6 +990,18 @@ wss.on("connection", (ws, req) => {
       const posSelf = { x: 0, y: 0 };
       console.log(`🚗 Self id=${data.userId} lat=${baseLat} lon=${baseLon} speed=${speedSelf} heading=${headingSelf}`);
 
+      const now = Date.now();
+
+      // ─── Stationary detection: track how long speed has been below 0.5 ───
+      if (speedSelf != null && speedSelf < 0.5) {
+        if (!stationaryStart.has(data.userId)) stationaryStart.set(data.userId, now);
+      } else if (speedSelf != null && speedSelf >= 0.5) {
+        stationaryStart.delete(data.userId);
+      }
+      const selfStaSeconds = stationaryStart.has(data.userId)
+        ? (now - stationaryStart.get(data.userId)) / 1000 : 0;
+      const selfStationary = speedSelf < 0.5 && selfStaSeconds >= STATIONARY_THRESHOLD_S;
+
       // FIX ISSUE #21: Compute client local hour once for all severity calls
       let clientHour;
       const dataTs = data.timestamp;
@@ -996,11 +1012,10 @@ wss.on("connection", (ws, req) => {
         clientHour = (d.getUTCHours() + offsetH + 24) % 24;
       }
 
-      const now = Date.now();
       const threats = [];
 
-      // ─── ETA Registry ───
-      if (etaRegistry && matched.matched) {
+      // ─── ETA Registry (skipped for stationary vehicles) ───
+      if (etaRegistry && matched.matched && !selfStationary) {
         const tracks = etaRegistry.junctions.size;
         etaRegistry.update(data.userId, matched, matched.snappedLat, matched.snappedLng, matched.roadHeading, vehicleSpeed, {
           timeSyncQuality: timeSyncEntry.confidence,
@@ -1118,6 +1133,15 @@ wss.on("connection", (ws, req) => {
 
           const headingOther = normalizeHeadingDeg(Number(other.heading ?? 0));
           const speedOther = Math.max(0, Number(other.speed ?? 0));
+
+          // ─── Stationary gate: genuinely parked vehicles skip ALL pair checks ───
+          const otherStaSeconds = stationaryStart.has(uid)
+            ? (now - stationaryStart.get(uid)) / 1000 : 0;
+          const otherStationary = speedOther < 0.5 && otherStaSeconds >= STATIONARY_THRESHOLD_S;
+          if (selfStationary || otherStationary) {
+            console.log(`🚫 Stationary gate: skip ${uid} (self=${selfStaSeconds.toFixed(1)}s, other=${otherStaSeconds.toFixed(1)}s)`);
+            continue;
+          }
 
           // Update nearby vehicle cache for turn queries
           nearbyVehicleCache.set(uid, {
@@ -1700,6 +1724,7 @@ wss.on("connection", (ws, req) => {
       wsMessageTimestamps.delete(uid);
       speedHistory.delete(uid);
       turningEventDebounce.delete(uid);
+      stationaryStart.delete(uid);
       if (mapMatcher) mapMatcher.removeUser(uid);
       console.log(`🔌 Removed socket mapping for ${uid}`);
     }
